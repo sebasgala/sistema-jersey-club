@@ -81,7 +81,19 @@ Elegidos para no chocar con otros proyectos de la máquina de desarrollo. No se 
 
 ## Puesta en marcha local
 
-> Estado actual: los 3 microservicios con su lógica de negocio completa y el gateway con JWT, verificados con la prueba end-to-end. `frontend-web` está pendiente.
+> Estado actual: los 3 microservicios, el gateway con JWT y el frontend web mobile-first, verificados con la prueba end-to-end.
+
+### Arranque rápido de todo el sistema
+
+Con los `.env` ya creados (paso 1) y las dependencias instaladas (`npm install` en cada proyecto), desde la raíz del repositorio en Git Bash:
+
+```bash
+docker compose up -d pg-jersey-club && \
+for s in ms-inventario ms-clientes ms-ventas gateway; do (cd $s && npm run build >/dev/null && (node dist/main > ../$s.log 2>&1 &)); done && \
+cd frontend-web && npm run dev
+```
+
+Abre `http://localhost:3014`, inicia sesión con el administrador del gateway y elige **Dueño** o **Vendedor**. Los logs de cada servicio quedan en `<servicio>.log` en la raíz (ignorados por git). Para detenerlos: `Ctrl+C` en el frontend y cierra los procesos `node` de los puertos 3010–3013.
 
 ### Requisitos
 
