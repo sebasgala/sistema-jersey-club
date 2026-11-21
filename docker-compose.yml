@@ -1,0 +1,31 @@
+# Sistema Jersey Club — entorno local
+# Puertos asignados en CLAUDE.md. Las credenciales se leen de .env (ver .env.example).
+name: jersey-club
+
+services:
+  pg-jersey-club:
+    image: postgres:16-alpine
+    container_name: pg-jersey-club
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Define POSTGRES_DB en .env}
+      POSTGRES_USER: ${POSTGRES_USER:?Define POSTGRES_USER en .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env}
+      TZ: America/Guayaquil
+      PGTZ: America/Guayaquil
+    ports:
+      - "${POSTGRES_PORT:-5436}:5432"
+    volumes:
+      - pg_jersey_club_data:/var/lib/postgresql/data
+      # En el primer arranque (volumen vacío) aplica 01_schema y 02_seed en orden alfabético.
+      # Ambos scripts son idempotentes y pueden reaplicarse a mano.
+      - ./database:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pg_jersey_club_data:
+    name: pg_jersey_club_data

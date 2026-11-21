@@ -1,0 +1,250 @@
+openapi: 3.0.3
+info:
+  title: Jersey Club — ms-clientes
+  version: 1.0.0
+  description: |
+    Datos de contacto, identificación tributaria ecuatoriana y despacho.
+
+    Validación de identificación (`IDENTIFICACION_INVALIDA` si no cumple):
+    - `CEDULA`: 10 dígitos, provincia 01–24 o 30, dígito verificador módulo 10.
+    - `RUC`: 13 dígitos terminados en `001` (persona natural, sociedad o entidad pública).
+    - `PASAPORTE`: alfanumérico de 5 a 20 caracteres.
+    - `CONSUMIDOR_FINAL`: siempre `9999999999999`. Existe un único registro precargado
+      con id fijo `00000000-0000-4000-8000-000000000001`; no se crean otros.
+
+    Sobre de respuesta `{ status, message, data }` y de error
+    `{ status, error, details[], error_code, correlation_id }` (ver `CLAUDE.md`).
+servers:
+  - url: http://localhost:3013/api/v1
+    description: Local directo
+  - url: http://localhost:3010/api/v1
+    description: Local vía gateway
+tags:
+  - name: clientes
+paths:
+  /clientes:
+    get:
+      tags: [clientes]
+      summary: Buscar clientes
+      operationId: listarClientes
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - { name: q, in: query, schema: { type: string }, description: Coincidencia parcial en nombre, identificación o teléfono }
+        - { name: identificacion, in: query, schema: { type: string }, description: Coincidencia exacta }
+        - { name: tipo_identificacion, in: query, schema: { $ref: '#/components/schemas/TipoIdentificacion' } }
+        - { name: ciudad, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Página de clientes
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: '#/components/schemas/Cliente' }
+                          meta: { $ref: '#/components/schemas/MetaPaginacion' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+    post:
+      tags: [clientes]
+      summary: Registrar cliente
+      operationId: crearCliente
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CrearCliente' }
+            example:
+              tipo_identificacion: CEDULA
+              identificacion: '1710034065'
+              nombre_completo: Cliente de Ejemplo
+              telefono: '+593 99 000 0000'
+              provincia: Pichincha
+              ciudad: Quito
+              direccion_referencia: Av. Ejemplo N00-00, junto al parque
+      responses:
+        '201':
+          description: Cliente creado
+          headers:
+            Location: { schema: { type: string }, description: '/api/v1/clientes/{id}' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Cliente' }
+        '400': { $ref: '#/components/responses/IdentificacionInvalida' }
+        '409':
+          description: 'La identificación ya está registrada (`CLIENTE_DUPLICADO`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /clientes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      tags: [clientes]
+      summary: Obtener cliente (usado por ms-ventas para el snapshot)
+      operationId: obtenerCliente
+      responses:
+        '200':
+          description: Cliente encontrado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Cliente' }
+        '404':
+          description: '`CLIENTE_NO_ENCONTRADO`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      tags: [clientes]
+      summary: Actualizar datos de contacto o despacho
+      description: El tipo y número de identificación no se modifican. El consumidor final no es editable.
+      operationId: actualizarCliente
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActualizarCliente' }
+      responses:
+        '200':
+          description: Cliente actualizado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Cliente' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404':
+          description: '`CLIENTE_NO_ENCONTRADO`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: 'Intento de editar el consumidor final (`CONSUMIDOR_FINAL_INMUTABLE`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  responses:
+    ErrorValidacion:
+      description: '`VALIDACION_FALLIDA`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    IdentificacionInvalida:
+      description: Datos inválidos o identificación que no cumple su formato
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            status: 400
+            error: Bad Request
+            details: ['La cédula 1710034060 no supera el dígito verificador']
+            error_code: IDENTIFICACION_INVALIDA
+            correlation_id: 7b0d2c1e-4f7a-4d3e-9b1a-2f6c8e9d0a11
+  schemas:
+    RespuestaBase:
+      type: object
+      required: [status, message, data]
+      properties:
+        status: { type: integer, example: 200 }
+        message: { type: string }
+        data: {}
+    Error:
+      type: object
+      required: [status, error, details, error_code, correlation_id]
+      properties:
+        status: { type: integer }
+        error: { type: string }
+        details:
+          type: array
+          items: { type: string }
+        error_code: { type: string }
+        correlation_id: { type: string, format: uuid }
+    MetaPaginacion:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+    TipoIdentificacion:
+      type: string
+      enum: [CEDULA, RUC, PASAPORTE, CONSUMIDOR_FINAL]
+    Cliente:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tipo_identificacion: { $ref: '#/components/schemas/TipoIdentificacion' }
+        identificacion: { type: string }
+        nombre_completo: { type: string }
+        telefono: { type: string, nullable: true }
+        provincia: { type: string, nullable: true }
+        ciudad: { type: string, nullable: true }
+        direccion_referencia: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CrearCliente:
+      type: object
+      additionalProperties: false
+      required: [tipo_identificacion, identificacion, nombre_completo]
+      properties:
+        tipo_identificacion:
+          type: string
+          enum: [CEDULA, RUC, PASAPORTE]
+          description: '`CONSUMIDOR_FINAL` no se crea; se usa el registro precargado.'
+        identificacion: { type: string, maxLength: 20 }
+        nombre_completo: { type: string, maxLength: 150 }
+        telefono: { type: string, maxLength: 25 }
+        provincia: { type: string, maxLength: 80 }
+        ciudad: { type: string, maxLength: 80 }
+        direccion_referencia: { type: string }
+    ActualizarCliente:
+      type: object
+      additionalProperties: false
+      properties:
+        nombre_completo: { type: string, maxLength: 150 }
+        telefono: { type: string, maxLength: 25, nullable: true }
+        provincia: { type: string, maxLength: 80, nullable: true }
+        ciudad: { type: string, maxLength: 80, nullable: true }
+        direccion_referencia: { type: string, nullable: true }

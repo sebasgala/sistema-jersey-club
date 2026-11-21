@@ -1,0 +1,670 @@
+openapi: 3.0.3
+info:
+  title: Jersey Club — ms-inventario
+  version: 1.0.0
+  description: |
+    Catálogo generalizado (`productos`, `variantes`), stock en tiempo real y Kardex (`movimientos_stock`).
+
+    Reglas del contrato (ver `CLAUDE.md`):
+    - Toda respuesta exitosa usa el sobre `{ status, message, data }`.
+    - Todo error usa `{ status, error, details[], error_code, correlation_id }`.
+    - `X-Correlation-Id` se acepta en toda petición y se devuelve en toda respuesta.
+    - Descuentos, reversiones y ajustes exigen `Idempotency-Key`. Repetir la misma clave devuelve
+      el resultado original (`200` + cabecera `Idempotent-Replayed: true`) sin volver a mover stock.
+    - Un descuento es atómico: o se descuentan todos los ítems o ninguno.
+servers:
+  - url: http://localhost:3011/api/v1
+    description: Local directo
+  - url: http://localhost:3010/api/v1
+    description: Local vía gateway
+tags:
+  - name: productos
+  - name: variantes
+  - name: stock
+paths:
+  /productos:
+    get:
+      tags: [productos]
+      summary: Listar productos con filtros
+      operationId: listarProductos
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - { name: categoria, in: query, schema: { $ref: '#/components/schemas/Categoria' } }
+        - { name: marca_equipo, in: query, schema: { type: string }, description: Coincidencia parcial sin distinguir mayúsculas }
+        - { name: temporada_coleccion, in: query, schema: { type: string, example: '2024-25' } }
+        - { name: activo, in: query, schema: { type: boolean, default: true } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Página de productos
+          headers: { X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PaginaProductos' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+    post:
+      tags: [productos]
+      summary: Crear producto
+      operationId: crearProducto
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CrearProducto' }
+      responses:
+        '201':
+          description: Producto creado
+          headers:
+            Location: { schema: { type: string }, description: '/api/v1/productos/{id}' }
+            X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Producto' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+  /productos/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      tags: [productos]
+      summary: Obtener producto con sus variantes
+      operationId: obtenerProducto
+      responses:
+        '200':
+          description: Producto encontrado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/Producto'
+                          - type: object
+                            properties:
+                              variantes:
+                                type: array
+                                items: { $ref: '#/components/schemas/Variante' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+    patch:
+      tags: [productos]
+      summary: Actualizar parcialmente un producto
+      operationId: actualizarProducto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActualizarProducto' }
+      responses:
+        '200':
+          description: Producto actualizado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Producto' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /variantes:
+    get:
+      tags: [variantes]
+      summary: Buscar variantes (filtros rápidos de inventario)
+      operationId: listarVariantes
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - { name: producto_id, in: query, schema: { type: string, format: uuid } }
+        - { name: categoria, in: query, schema: { $ref: '#/components/schemas/Categoria' } }
+        - { name: marca_equipo, in: query, schema: { type: string } }
+        - { name: temporada_coleccion, in: query, schema: { type: string } }
+        - { name: talla_medida, in: query, schema: { type: string, example: M } }
+        - { name: version_modelo, in: query, schema: { type: string, example: JUGADOR } }
+        - { name: adicional_parche, in: query, schema: { type: string }, description: Coincidencia parcial }
+        - { name: adicional_dorsal, in: query, schema: { type: string }, description: Coincidencia parcial }
+        - { name: codigo_legacy, in: query, schema: { type: string, example: LTOO2 } }
+        - { name: con_stock, in: query, schema: { type: boolean }, description: '`true` devuelve solo variantes con `stock_actual > 0`' }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Página de variantes
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PaginaVariantes' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+    post:
+      tags: [variantes]
+      summary: Crear variante (nace con stock 0; el stock entra por `/stock/ajustes`)
+      operationId: crearVariante
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CrearVariante' }
+      responses:
+        '201':
+          description: Variante creada
+          headers:
+            Location: { schema: { type: string }, description: '/api/v1/variantes/{id}' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Variante' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409':
+          description: 'Ya existe la combinación producto + talla + versión + parche + dorsal (`VARIANTE_DUPLICADA`) o el `codigo_legacy` (`CODIGO_LEGACY_DUPLICADO`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /variantes/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      tags: [variantes]
+      summary: Obtener variante (incluye producto)
+      operationId: obtenerVariante
+      responses:
+        '200':
+          description: Variante encontrada
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/VarianteConProducto' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+    patch:
+      tags: [variantes]
+      summary: Actualizar datos de la variante (nunca `stock_actual`)
+      operationId: actualizarVariante
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActualizarVariante' }
+      responses:
+        '200':
+          description: Variante actualizada
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Variante' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409': { $ref: '#/components/responses/Conflicto' }
+
+  /stock/descuentos:
+    post:
+      tags: [stock]
+      summary: Descontar stock de forma atómica (usado por ms-ventas)
+      description: |
+        En una sola transacción: bloquea cada variante (`SELECT ... FOR UPDATE`), verifica
+        `stock_actual >= cantidad`, descuenta y registra un movimiento `VENTA` por ítem.
+        Si cualquier ítem no tiene stock, no se descuenta nada y se responde `409`.
+        Cada movimiento se guarda con `idempotency_key = "<Idempotency-Key>:<variante_id>"`.
+        La respuesta incluye el snapshot de cada variante para que ms-ventas lo congele.
+      operationId: crearDescuento
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudDescuento' }
+      responses:
+        '201':
+          description: Stock descontado
+          headers: { X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ResultadoDescuento' }
+        '200':
+          description: Repetición idempotente; devuelve el resultado original sin mover stock
+          headers:
+            Idempotent-Replayed: { schema: { type: boolean, example: true } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ResultadoDescuento' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409': { $ref: '#/components/responses/StockInsuficiente' }
+        '503': { $ref: '#/components/responses/NoDisponible' }
+  /stock/reversiones:
+    post:
+      tags: [stock]
+      summary: Revertir el descuento de una venta (compensación de la saga)
+      description: |
+        Devuelve al stock lo descontado para `referencia_id` y registra un movimiento
+        `REVERSION_VENTA` por ítem. Si ya estaba revertido responde `200` sin mover stock.
+      operationId: crearReversion
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudReversion' }
+      responses:
+        '201':
+          description: Stock revertido
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ResultadoMovimientos' }
+        '200':
+          description: Ya estaba revertido (idempotente)
+          headers:
+            Idempotent-Replayed: { schema: { type: boolean, example: true } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ResultadoMovimientos' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404':
+          description: 'No existe un descuento para esa `referencia_id` (`DESCUENTO_NO_ENCONTRADO`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503': { $ref: '#/components/responses/NoDisponible' }
+  /stock/ajustes:
+    post:
+      tags: [stock]
+      summary: Ajuste manual de inventario (entrada o salida)
+      operationId: crearAjuste
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudAjuste' }
+      responses:
+        '201':
+          description: Ajuste registrado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/MovimientoStock' }
+        '200':
+          description: Repetición idempotente
+          headers:
+            Idempotent-Replayed: { schema: { type: boolean, example: true } }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409': { $ref: '#/components/responses/StockInsuficiente' }
+  /stock/movimientos:
+    get:
+      tags: [stock]
+      summary: Consultar el Kardex
+      operationId: listarMovimientos
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - { name: variante_id, in: query, schema: { type: string, format: uuid } }
+        - { name: referencia_id, in: query, schema: { type: string, format: uuid } }
+        - { name: tipo, in: query, schema: { $ref: '#/components/schemas/TipoMovimiento' } }
+        - { name: desde, in: query, schema: { type: string, format: date-time } }
+        - { name: hasta, in: query, schema: { type: string, format: date-time } }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Página de movimientos
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: '#/components/schemas/MovimientoStock' }
+                          meta: { $ref: '#/components/schemas/MetaPaginacion' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+
+components:
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: Identificador de trazabilidad. Si no llega, el servicio genera uno.
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Clave única de la operación (ms-ventas usa el id de la venta).
+      schema: { type: string, minLength: 8, maxLength: 64 }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  headers:
+    CorrelationId:
+      schema: { type: string, format: uuid }
+  responses:
+    ErrorValidacion:
+      description: Datos inválidos (`VALIDACION_FALLIDA`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            status: 400
+            error: Bad Request
+            details: ['cantidad must be a positive number']
+            error_code: VALIDACION_FALLIDA
+            correlation_id: 7b0d2c1e-4f7a-4d3e-9b1a-2f6c8e9d0a11
+    NoEncontrado:
+      description: Recurso inexistente (`PRODUCTO_NO_ENCONTRADO` / `VARIANTE_NO_ENCONTRADA`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflicto:
+      description: Conflicto de unicidad
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    StockInsuficiente:
+      description: Stock insuficiente en al menos una variante; no se movió stock
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            status: 409
+            error: Conflict
+            details: ['Variante 3f2c9a1e-... (LTOO2): solicitado 2, disponible 1']
+            error_code: STOCK_INSUFICIENTE
+            correlation_id: 7b0d2c1e-4f7a-4d3e-9b1a-2f6c8e9d0a11
+    NoDisponible:
+      description: Base de datos o dependencia no disponible (`SERVICIO_NO_DISPONIBLE`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    RespuestaBase:
+      type: object
+      required: [status, message, data]
+      properties:
+        status: { type: integer, example: 200 }
+        message: { type: string, example: Operación exitosa }
+        data: {}
+    Error:
+      type: object
+      required: [status, error, details, error_code, correlation_id]
+      properties:
+        status: { type: integer, example: 409 }
+        error: { type: string, example: Conflict }
+        details:
+          type: array
+          items: { type: string }
+        error_code: { type: string, example: STOCK_INSUFICIENTE }
+        correlation_id: { type: string, format: uuid }
+    MetaPaginacion:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+    Categoria:
+      type: string
+      description: Lista abierta; estas son las categorías iniciales.
+      example: CAMISETA
+      enum: [CAMISETA, CHOMPA, CANILLERAS, GORRA, ACCESORIO]
+    TipoMovimiento:
+      type: string
+      enum: [SALDO_INICIAL, VENTA, REVERSION_VENTA, AJUSTE_ENTRADA, AJUSTE_SALIDA]
+    Dinero:
+      type: string
+      pattern: '^-?\d{1,8}\.\d{2}$'
+      description: Decimal con 2 cifras serializado como texto para no perder precisión.
+      example: '30.00'
+    Producto:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        categoria: { $ref: '#/components/schemas/Categoria' }
+        nombre: { type: string, example: Argentina LOCAL }
+        marca_equipo: { type: string, example: Argentina }
+        temporada_coleccion: { type: string, nullable: true, example: '2024' }
+        activo: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CrearProducto:
+      type: object
+      additionalProperties: false
+      required: [categoria, nombre, marca_equipo]
+      properties:
+        categoria: { $ref: '#/components/schemas/Categoria' }
+        nombre: { type: string, maxLength: 150 }
+        marca_equipo: { type: string, maxLength: 100 }
+        temporada_coleccion: { type: string, maxLength: 20, pattern: '^\d{4}(-\d{2})?$', example: '2024-25' }
+    ActualizarProducto:
+      type: object
+      additionalProperties: false
+      properties:
+        categoria: { $ref: '#/components/schemas/Categoria' }
+        nombre: { type: string, maxLength: 150 }
+        marca_equipo: { type: string, maxLength: 100 }
+        temporada_coleccion: { type: string, maxLength: 20, nullable: true }
+        activo: { type: boolean }
+    Variante:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        producto_id: { type: string, format: uuid }
+        codigo_legacy: { type: string, nullable: true, example: LTOO2 }
+        talla_medida: { type: string, example: L }
+        version_modelo: { type: string, example: JUGADOR }
+        adicional_parche: { type: string, nullable: true, example: EUROCOPA Y UEFA FOUNDATION }
+        adicional_dorsal: { type: string, nullable: true, example: KRROS 8 }
+        observaciones: { type: string, nullable: true }
+        stock_actual: { type: integer, minimum: 0 }
+        valor_jersey_club: { $ref: '#/components/schemas/Dinero' }
+        pvp_sugerido: { $ref: '#/components/schemas/Dinero' }
+        activo: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    VarianteConProducto:
+      allOf:
+        - $ref: '#/components/schemas/Variante'
+        - type: object
+          properties:
+            producto: { $ref: '#/components/schemas/Producto' }
+    CrearVariante:
+      type: object
+      additionalProperties: false
+      required: [producto_id, talla_medida, version_modelo]
+      properties:
+        producto_id: { type: string, format: uuid }
+        codigo_legacy: { type: string, maxLength: 30 }
+        talla_medida: { type: string, maxLength: 20 }
+        version_modelo: { type: string, maxLength: 30 }
+        adicional_parche: { type: string, maxLength: 150 }
+        adicional_dorsal: { type: string, maxLength: 100 }
+        observaciones: { type: string }
+        valor_jersey_club: { $ref: '#/components/schemas/Dinero' }
+        pvp_sugerido: { $ref: '#/components/schemas/Dinero' }
+    ActualizarVariante:
+      type: object
+      additionalProperties: false
+      description: '`stock_actual` no es editable; solo cambia por movimientos de stock.'
+      properties:
+        talla_medida: { type: string, maxLength: 20 }
+        version_modelo: { type: string, maxLength: 30 }
+        adicional_parche: { type: string, maxLength: 150, nullable: true }
+        adicional_dorsal: { type: string, maxLength: 100, nullable: true }
+        observaciones: { type: string, nullable: true }
+        valor_jersey_club: { $ref: '#/components/schemas/Dinero' }
+        pvp_sugerido: { $ref: '#/components/schemas/Dinero' }
+        activo: { type: boolean }
+    PaginaProductos:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Producto' }
+        meta: { $ref: '#/components/schemas/MetaPaginacion' }
+    PaginaVariantes:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/VarianteConProducto' }
+        meta: { $ref: '#/components/schemas/MetaPaginacion' }
+    SolicitudDescuento:
+      type: object
+      additionalProperties: false
+      required: [referencia_id, items]
+      properties:
+        referencia_id: { type: string, format: uuid, description: Id de la venta en ms-ventas }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [variante_id, cantidad]
+            properties:
+              variante_id: { type: string, format: uuid }
+              cantidad: { type: integer, minimum: 1 }
+    SnapshotVariante:
+      type: object
+      description: Datos congelados que ms-ventas guarda en `detalle_ventas.snapshot_producto`.
+      properties:
+        variante_id: { type: string, format: uuid }
+        producto_id: { type: string, format: uuid }
+        codigo_legacy: { type: string, nullable: true }
+        categoria: { type: string }
+        nombre: { type: string }
+        marca_equipo: { type: string }
+        temporada_coleccion: { type: string, nullable: true }
+        talla_medida: { type: string }
+        version_modelo: { type: string }
+        adicional_parche: { type: string, nullable: true }
+        adicional_dorsal: { type: string, nullable: true }
+        valor_jersey_club: { $ref: '#/components/schemas/Dinero' }
+        pvp_sugerido: { $ref: '#/components/schemas/Dinero' }
+    MovimientoStock:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        variante_id: { type: string, format: uuid }
+        tipo: { $ref: '#/components/schemas/TipoMovimiento' }
+        cantidad: { type: integer, description: Siempre positiva; el tipo indica el sentido }
+        stock_anterior: { type: integer }
+        stock_nuevo: { type: integer }
+        idempotency_key: { type: string, nullable: true }
+        referencia_id: { type: string, format: uuid, nullable: true }
+        observacion: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    ResultadoDescuento:
+      type: object
+      properties:
+        referencia_id: { type: string, format: uuid }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              movimiento: { $ref: '#/components/schemas/MovimientoStock' }
+              snapshot: { $ref: '#/components/schemas/SnapshotVariante' }
+    SolicitudReversion:
+      type: object
+      additionalProperties: false
+      required: [referencia_id]
+      properties:
+        referencia_id: { type: string, format: uuid }
+        motivo: { type: string, maxLength: 300 }
+    ResultadoMovimientos:
+      type: object
+      properties:
+        referencia_id: { type: string, format: uuid }
+        movimientos:
+          type: array
+          items: { $ref: '#/components/schemas/MovimientoStock' }
+    SolicitudAjuste:
+      type: object
+      additionalProperties: false
+      required: [variante_id, tipo, cantidad, observacion]
+      properties:
+        variante_id: { type: string, format: uuid }
+        tipo:
+          type: string
+          enum: [AJUSTE_ENTRADA, AJUSTE_SALIDA]
+        cantidad: { type: integer, minimum: 1 }
+        observacion: { type: string, maxLength: 300 }
