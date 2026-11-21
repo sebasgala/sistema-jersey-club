@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+/*
+ * Mundo visual Jersey Club: negro de marca, blanco frío y la plata cepillada del isotipo.
+ * La plata solo marca lo completo (costo cargado, ítem activo, progreso).
+ * Estados siempre con texto además del color.
+ */
+@theme {
+  --color-tinta: #1b1c1e;
+  --color-tinta-2: #2a2b2f;
+  --color-tinta-3: #3a3c41;
+  --color-humo: #a7abb1;
+  --color-papel: #f3f3f0;
+  --color-blanco: #ffffff;
+  --color-linea: #dfdfda;
+  --color-linea-2: #ececE8;
+  --color-gris: #62666c;
+  --color-plata-1: #f1f3f5;
+  --color-plata-2: #c3c8cd;
+  --color-plata-3: #8c9299;
+  --color-ok: #17734a;
+  --color-ok-fondo: #dcefe4;
+  --color-alerta: #8a5806;
+  --color-alerta-fondo: #f8ebcc;
+  --color-error: #ad1f2c;
+  --color-error-fondo: #f8dcdf;
+
+  --font-sans: var(--font-barlow), system-ui, sans-serif;
+  --font-cifra: var(--font-barlow-condensed), var(--font-barlow), system-ui, sans-serif;
+
+  --radius-placa: 6px;
+  --shadow-flota: 0 12px 32px -12px rgb(27 28 30 / 0.35), 0 2px 6px -2px rgb(27 28 30 / 0.18);
+  --shadow-suave: 0 1px 2px rgb(27 28 30 / 0.06), 0 4px 12px -6px rgb(27 28 30 / 0.12);
+
+  --animate-entrar: entrar 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-placa: placa 520ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  @keyframes entrar {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes placa {
+    from { background-position: 120% 0; filter: brightness(1.15); }
+    to { background-position: 0 0; filter: none; }
+  }
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    scrollbar-color: var(--color-plata-3) transparent;
+  }
+  body {
+    background: var(--color-papel);
+    color: var(--color-tinta);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1, "lnum" 1;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: var(--color-tinta);
+    color: var(--color-plata-1);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-tinta);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .sobre-tinta :focus-visible {
+    outline-color: var(--color-plata-2);
+  }
+  input, select, textarea {
+    caret-color: var(--color-tinta);
+  }
+  a {
+    text-underline-offset: 3px;
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--color-plata-2); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
+}
+
+@layer components {
+  /* Plata cepillada del isotipo: la placa de "completo". */
+  .metal {
+    background-image:
+      repeating-linear-gradient(90deg, rgb(255 255 255 / 0.05) 0 1px, transparent 1px 3px),
+      linear-gradient(135deg, #f4f5f7 0%, #c6cbd1 38%, #eef0f2 56%, #a2a8af 100%);
+    background-size: auto, 220% 100%;
+    color: var(--color-tinta);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.85), inset 0 -1px 0 rgb(27 28 30 / 0.14);
+  }
+  .metal-barra {
+    background-image: linear-gradient(90deg, #9aa0a7, #eef0f2 45%, #b9bec4 70%, #8c9299);
+  }
+  .cifra {
+    font-family: var(--font-cifra);
+    font-variant-numeric: tabular-nums lining-nums;
+    letter-spacing: -0.01em;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
