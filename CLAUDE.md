@@ -149,6 +149,16 @@ Error:
 - Cada servicio se conecta con `schema` y `search_path` limitados a su propio esquema (`DB_SCHEMA`).
 - `database/02_seed_inventario.sql` es **generado**: no se edita a mano; se regenera con `scripts-migracion/limpiar_y_migrar_excel.py` (solo openpyxl), que es determinista (UUID v5) y nunca modifica el Excel original.
 
+### Reglas de implementación vigentes
+
+- **Idempotencia en ms-inventario:** `Idempotency-Key` de 8 a 48 caracteres (se compone como `<clave>:<variante_id>` dentro de `VARCHAR(100)`). ms-ventas usa el id de la venta como clave.
+- **Bloqueos:** toda operación de stock bloquea las variantes con `SELECT ... FOR UPDATE` **en orden de id** para evitar interbloqueos.
+- **Kardex valorizado:** cada movimiento guarda `costo_unitario`; una repetición idempotente devuelve el costo original.
+- **Dinero:** se calcula en centavos enteros (`common/dinero.util.ts`), nunca con `number` de punto flotante.
+- **Gateway:** único punto público (JWT obligatorio salvo `/auth/login` y `/salud`). Los microservicios no validan JWT: en producción no deben exponerse fuera de la red interna.
+- **Cambios de esquema:** solo aditivos e idempotentes en `01_schema_mvp_jersey_club.sql` (`ADD COLUMN IF NOT EXISTS`), reaplicables sobre una base existente.
+- **Antes de dar por terminada una funcionalidad** se ejecuta `pruebas-e2e/flujo-venta.e2e.mjs`; debe terminar con todas las verificaciones OK y la huella de inventario intacta.
+
 ## 6. Versiones de Dependencias
 
 - NestJS 11 (generado por `@nestjs/cli@11`). `@nestjs/swagger` está fijado a `^11` porque la serie 12 exige NestJS 12; no usar `--force` ni `--legacy-peer-deps` para saltarse conflictos de peers.

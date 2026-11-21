@@ -1,15 +1,8 @@
 import { HttpModule } from '@nestjs/axios';
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-
-export const URLS_SERVICIOS = Symbol('URLS_SERVICIOS');
-
-export interface UrlsServicios {
-  inventario: string;
-  clientes: string;
-  timeoutInventarioMs: number;
-  timeoutClientesMs: number;
-}
+import { URLS_SERVICIOS, type UrlsServicios } from './integraciones.config';
+import { IntegracionesService } from './integraciones.service';
 
 /**
  * Clientes HTTP hacia ms-inventario y ms-clientes (comunicación síncrona REST).
@@ -29,7 +22,8 @@ export interface UrlsServicios {
         timeoutClientesMs: Number(config.get('CLIENTES_TIMEOUT_MS', 2000)),
       }),
     },
+    IntegracionesService,
   ],
-  exports: [HttpModule, URLS_SERVICIOS],
+  exports: [IntegracionesService],
 })
 export class IntegracionesModule {}

@@ -1,43 +1,51 @@
 openapi: 3.0.3
 info:
   title: Jersey Club — ms-clientes
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Datos de contacto, identificación tributaria ecuatoriana y despacho.
 
-    Validación de identificación (`IDENTIFICACION_INVALIDA` si no cumple):
-    - `CEDULA`: 10 dígitos, provincia 01–24 o 30, dígito verificador módulo 10.
-    - `RUC`: 13 dígitos terminados en `001` (persona natural, sociedad o entidad pública).
-    - `PASAPORTE`: alfanumérico de 5 a 20 caracteres.
+    Validación de identificación (`400 IDENTIFICACION_INVALIDA` si no cumple). Espacios y guiones se eliminan:
+    - `CEDULA`: 10 dígitos, provincia 01–24 o 30, tercer dígito 0–5 y dígito verificador módulo 10.
+    - `RUC`: 13 dígitos terminados en `001`, provincia válida, tercer dígito 0–5 (persona natural: los
+      10 primeros dígitos deben ser una cédula válida), 6 (sector público) o 9 (sociedad privada).
+    - `PASAPORTE`: alfanumérico de 5 a 20 caracteres (se guarda en mayúsculas).
     - `CONSUMIDOR_FINAL`: siempre `9999999999999`. Existe un único registro precargado
-      con id fijo `00000000-0000-4000-8000-000000000001`; no se crean otros.
+      con id fijo `00000000-0000-4000-8000-000000000001`; no es editable.
 
+    `nombre_completo` se guarda en mayúsculas y `email` en minúsculas.
     Sobre de respuesta `{ status, message, data }` y de error
     `{ status, error, details[], error_code, correlation_id }` (ver `CLAUDE.md`).
+
+    Changelog 1.1.0 (aditivo): campos `email` y `courier_preferido`; parámetro `busqueda`
+    (reemplaza a `q`); `GET /clientes/identificacion/{identificacion}`; cambio de identificación en PATCH.
 servers:
   - url: http://localhost:3013/api/v1
     description: Local directo
   - url: http://localhost:3010/api/v1
-    description: Local vía gateway
+    description: Local vía gateway (requiere JWT)
 tags:
   - name: clientes
+  - name: salud
 paths:
   /clientes:
     get:
       tags: [clientes]
-      summary: Buscar clientes
+      summary: Búsqueda rápida de clientes
       operationId: listarClientes
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
-        - { name: q, in: query, schema: { type: string }, description: Coincidencia parcial en nombre, identificación o teléfono }
-        - { name: identificacion, in: query, schema: { type: string }, description: Coincidencia exacta }
+        - name: busqueda
+          in: query
+          schema: { type: string, maxLength: 100 }
+          description: 'Coincidencia parcial en nombre, identificación (cédula/RUC/pasaporte) o teléfono. Con 4+ dígitos también compara el teléfono ignorando espacios y guiones.'
         - { name: tipo_identificacion, in: query, schema: { $ref: '#/components/schemas/TipoIdentificacion' } }
-        - { name: ciudad, in: query, schema: { type: string } }
+        - { name: ciudad, in: query, schema: { type: string }, description: Coincidencia parcial }
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Página de clientes
+          description: Página de clientes ordenada por nombre
           content:
             application/json:
               schema:
@@ -55,7 +63,7 @@ paths:
         '400': { $ref: '#/components/responses/ErrorValidacion' }
     post:
       tags: [clientes]
-      summary: Registrar cliente
+      summary: Registrar cliente con validación ecuatoriana
       operationId: crearCliente
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -69,9 +77,11 @@ paths:
               identificacion: '1710034065'
               nombre_completo: Cliente de Ejemplo
               telefono: '+593 99 000 0000'
+              email: cliente@ejemplo.com
               provincia: Pichincha
               ciudad: Quito
               direccion_referencia: Av. Ejemplo N00-00, junto al parque
+              courier_preferido: SERVIENTREGA
       responses:
         '201':
           description: Cliente creado
@@ -91,6 +101,29 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /clientes/identificacion/{identificacion}:
+    get:
+      tags: [clientes]
+      summary: Obtener cliente por cédula, RUC o pasaporte
+      operationId: obtenerClientePorIdentificacion
+      parameters:
+        - name: identificacion
+          in: path
+          required: true
+          schema: { type: string, example: '1710034065' }
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Cliente encontrado
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Cliente' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
   /clientes/{id}:
     parameters:
       - name: id
@@ -113,15 +146,15 @@ paths:
                   - type: object
                     properties:
                       data: { $ref: '#/components/schemas/Cliente' }
-        '404':
-          description: '`CLIENTE_NO_ENCONTRADO`'
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
     patch:
       tags: [clientes]
-      summary: Actualizar datos de contacto o despacho
-      description: El tipo y número de identificación no se modifican. El consumidor final no es editable.
+      summary: Actualizar contacto, despacho o identificación
+      description: |
+        Campos omitidos no cambian; `null` limpia un campo opcional.
+        Para cambiar la identificación envíe `tipo_identificacion` e `identificacion` juntos (se validan igual que al crear).
+        El consumidor final no es editable.
       operationId: actualizarCliente
       requestBody:
         required: true
@@ -139,14 +172,26 @@ paths:
                   - type: object
                     properties:
                       data: { $ref: '#/components/schemas/Cliente' }
-        '400': { $ref: '#/components/responses/ErrorValidacion' }
-        '404':
-          description: '`CLIENTE_NO_ENCONTRADO`'
+        '400': { $ref: '#/components/responses/IdentificacionInvalida' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409':
+          description: '`CONSUMIDOR_FINAL_INMUTABLE` o `CLIENTE_DUPLICADO` (la nueva identificación ya existe)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-        '409':
-          description: 'Intento de editar el consumidor final (`CONSUMIDOR_FINAL_INMUTABLE`)'
+  /salud:
+    get:
+      tags: [salud]
+      summary: Estado del servicio y del esquema conectado
+      operationId: salud
+      responses:
+        '200':
+          description: Servicio operativo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RespuestaBase' }
+        '503':
+          description: '`BASE_DATOS_NO_DISPONIBLE`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -172,15 +217,20 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    NoEncontrado:
+      description: '`CLIENTE_NO_ENCONTRADO`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
     IdentificacionInvalida:
-      description: Datos inválidos o identificación que no cumple su formato
+      description: Datos inválidos (`VALIDACION_FALLIDA`) o identificación que no cumple su formato (`IDENTIFICACION_INVALIDA`)
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
           example:
             status: 400
             error: Bad Request
-            details: ['La cédula 1710034060 no supera el dígito verificador']
+            details: ['La cédula 1710034060 no supera el dígito verificador (módulo 10)']
             error_code: IDENTIFICACION_INVALIDA
             correlation_id: 7b0d2c1e-4f7a-4d3e-9b1a-2f6c8e9d0a11
   schemas:
@@ -211,6 +261,10 @@ components:
     TipoIdentificacion:
       type: string
       enum: [CEDULA, RUC, PASAPORTE, CONSUMIDOR_FINAL]
+    Courier:
+      type: string
+      enum: [SERVIENTREGA, LAAR_COURIER, ENTREGA_QUITO, OTRO]
+      default: SERVIENTREGA
     Cliente:
       type: object
       properties:
@@ -219,9 +273,11 @@ components:
         identificacion: { type: string }
         nombre_completo: { type: string }
         telefono: { type: string, nullable: true }
+        email: { type: string, format: email, nullable: true }
         provincia: { type: string, nullable: true }
         ciudad: { type: string, nullable: true }
         direccion_referencia: { type: string, nullable: true }
+        courier_preferido: { $ref: '#/components/schemas/Courier' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     CrearCliente:
@@ -230,21 +286,30 @@ components:
       required: [tipo_identificacion, identificacion, nombre_completo]
       properties:
         tipo_identificacion:
+          $ref: '#/components/schemas/TipoIdentificacion'
+        identificacion:
           type: string
-          enum: [CEDULA, RUC, PASAPORTE]
-          description: '`CONSUMIDOR_FINAL` no se crea; se usa el registro precargado.'
-        identificacion: { type: string, maxLength: 20 }
+          maxLength: 20
+          description: '`CONSUMIDOR_FINAL` solo admite 9999999999999, que ya existe (→ 409); use el registro precargado.'
         nombre_completo: { type: string, maxLength: 150 }
-        telefono: { type: string, maxLength: 25 }
+        telefono: { type: string, pattern: '^\+?[0-9 ()-]{7,20}$' }
+        email: { type: string, format: email, maxLength: 150 }
         provincia: { type: string, maxLength: 80 }
         ciudad: { type: string, maxLength: 80 }
-        direccion_referencia: { type: string }
+        direccion_referencia: { type: string, maxLength: 500 }
+        courier_preferido: { $ref: '#/components/schemas/Courier' }
     ActualizarCliente:
       type: object
       additionalProperties: false
       properties:
+        tipo_identificacion:
+          type: string
+          enum: [CEDULA, RUC, PASAPORTE]
+        identificacion: { type: string, maxLength: 20 }
         nombre_completo: { type: string, maxLength: 150 }
-        telefono: { type: string, maxLength: 25, nullable: true }
+        telefono: { type: string, nullable: true, pattern: '^\+?[0-9 ()-]{7,20}$' }
+        email: { type: string, format: email, nullable: true }
         provincia: { type: string, maxLength: 80, nullable: true }
         ciudad: { type: string, maxLength: 80, nullable: true }
-        direccion_referencia: { type: string, nullable: true }
+        direccion_referencia: { type: string, maxLength: 500, nullable: true }
+        courier_preferido: { $ref: '#/components/schemas/Courier' }

@@ -1,31 +1,41 @@
 openapi: 3.0.3
 info:
   title: Jersey Club — ms-ventas
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Ventas con cierre en un solo clic, detalle con costo congelado y ganancia real.
 
     `POST /ventas` orquesta la saga (ver `docs/04_Patrones_Integracion_Obsidian.md`):
-    1. Obtiene el cliente en ms-clientes (`GET /clientes/{id}`, timeout 2 s). Si ms-clientes no
-       responde, acepta `cliente_respaldo` del cuerpo o usa el consumidor final.
-    2. Guarda la venta como `PENDIENTE`.
-    3. Descuenta stock en ms-inventario (`POST /stock/descuentos`, timeout 3 s,
-       `Idempotency-Key` = id de la venta). `409` → venta `RECHAZADA`.
-    4. Congela snapshots y `valor_jersey_club_unitario`, calcula totales y ganancia, registra
-       el evento `VentaConfirmada` en `outbox_eventos` y confirma (`CONFIRMADA`) en una sola
-       transacción local.
-    5. Si el paso 4 falla, compensa con `POST /stock/reversiones` y marca `FALLIDA`.
+    1. **Idempotencia:** si la `Idempotency-Key` ya existe devuelve la venta original (`200`) o el
+       resultado previo (`409 VENTA_RECHAZADA` / `VENTA_FALLIDA` / `VENTA_EN_PROCESO`).
+    2. **Cliente:** `GET ms-clientes /clientes/{id}` (timeout 2 s). Sin `cliente_id` → consumidor final.
+       Si ms-clientes no responde, la venta NO se bloquea: usa `cliente_respaldo` o un snapshot
+       `NO_VERIFICADO`, y `message` incluye una advertencia. Un `404` de ms-clientes sí es error.
+    3. Guarda la venta como `PENDIENTE` (comprobante `JC-AAAA-NNNNNN`).
+    4. `POST ms-inventario /stock/descuentos` (timeout 3 s, `Idempotency-Key` = id de la venta).
+       `409`/`404`/`400` → venta `RECHAZADA` y se propaga el error de inventario.
+       Inventario caído o timeout → compensación preventiva y `503 INVENTARIO_NO_DISPONIBLE`.
+    5. En una transacción local: `detalle_ventas` con `valor_jersey_club_unitario` congelado, totales,
+       evento `VentaConfirmada` en `outbox_eventos` y estado `CONFIRMADA`.
+    6. **Compensación:** si el paso 5 falla, `POST /stock/reversiones` y estado `FALLIDA`
+       (`500 VENTA_FALLIDA`). Si la reversión tampoco es posible, la venta queda `PENDIENTE`
+       con observación `REVERSION_PENDIENTE` para conciliación.
 
-    Sobre de respuesta `{ status, message, data }` y de error
-    `{ status, error, details[], error_code, correlation_id }` (ver `CLAUDE.md`).
+    Reintentos hacia otros servicios: máximo 2, con backoff (150 ms, 300 ms), solo ante conexión
+    rechazada/reiniciada o 502/503/504; los timeouts no se reintentan. Todas las llamadas propagan `X-Correlation-Id`.
+    Los montos se calculan en centavos enteros; se envían y responden como texto con 2 decimales.
+    Las fechas de filtros son fechas locales de Ecuador (`America/Guayaquil`).
+
+    Changelog 1.1.0: `GET /ventas/dashboard` reemplaza a `GET /reportes/ganancias` (aún no publicado);
+    códigos de repetición idempotente; `500 VENTA_FALLIDA`.
 servers:
   - url: http://localhost:3012/api/v1
     description: Local directo
   - url: http://localhost:3010/api/v1
-    description: Local vía gateway
+    description: Local vía gateway (requiere JWT)
 tags:
   - name: ventas
-  - name: reportes
+  - name: salud
 paths:
   /ventas:
     post:
@@ -63,7 +73,7 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/Venta' }
         '200':
-          description: Repetición idempotente; devuelve la venta original
+          description: Repetición idempotente; devuelve la venta original sin volver a descontar
           headers:
             Idempotent-Replayed: { schema: { type: boolean, example: true } }
           content:
@@ -75,7 +85,7 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/Venta' }
         '400':
-          description: '`VALIDACION_FALLIDA`'
+          description: '`VALIDACION_FALLIDA`, `IDEMPOTENCY_KEY_REQUERIDA` o `IDEMPOTENCY_KEY_INVALIDA`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -85,7 +95,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: 'Stock insuficiente (`STOCK_INSUFICIENTE`); la venta queda `RECHAZADA` y no se movió stock'
+          description: |
+            `STOCK_INSUFICIENTE` o `VARIANTE_INACTIVA` (la venta queda `RECHAZADA` y no se movió stock),
+            o repetición de una clave cuya venta terminó `VENTA_RECHAZADA` / `VENTA_FALLIDA` / está `VENTA_EN_PROCESO`.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -95,19 +107,24 @@ paths:
                 details: ['Variante 3f2c9a1e-... (LTOO2): solicitado 2, disponible 1']
                 error_code: STOCK_INSUFICIENTE
                 correlation_id: 7b0d2c1e-4f7a-4d3e-9b1a-2f6c8e9d0a11
+        '500':
+          description: '`VENTA_FALLIDA`: error al confirmar después de descontar; el stock fue revertido (compensación)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '503':
-          description: 'ms-inventario no disponible (`INVENTARIO_NO_DISPONIBLE`); no se registra la venta'
+          description: '`INVENTARIO_NO_DISPONIBLE`; no se registra la venta'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
     get:
       tags: [ventas]
-      summary: Listar ventas
+      summary: Historial de ventas
       operationId: listarVentas
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
-        - { name: desde, in: query, schema: { type: string, format: date } }
-        - { name: hasta, in: query, schema: { type: string, format: date } }
+        - { name: desde, in: query, schema: { type: string, format: date }, description: Fecha local inclusive }
+        - { name: hasta, in: query, schema: { type: string, format: date }, description: Fecha local inclusive }
         - { name: estado, in: query, schema: { $ref: '#/components/schemas/EstadoVenta' } }
         - { name: metodo_pago, in: query, schema: { $ref: '#/components/schemas/MetodoPago' } }
         - { name: cliente_id, in: query, schema: { type: string, format: uuid } }
@@ -116,7 +133,7 @@ paths:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
       responses:
         '200':
-          description: Página de ventas (sin detalle)
+          description: Página de ventas, más recientes primero (sin detalle)
           content:
             application/json:
               schema:
@@ -131,6 +148,32 @@ paths:
                             type: array
                             items: { $ref: '#/components/schemas/VentaResumen' }
                           meta: { $ref: '#/components/schemas/MetaPaginacion' }
+        '400':
+          description: '`VALIDACION_FALLIDA` (incluye `desde` posterior a `hasta`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /ventas/dashboard:
+    get:
+      tags: [ventas]
+      summary: KPIs del dashboard ejecutivo
+      description: Solo considera ventas `CONFIRMADA`. Por defecto, del primer día del mes en curso a hoy (hora de Ecuador).
+      operationId: obtenerDashboard
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - { name: desde, in: query, schema: { type: string, format: date } }
+        - { name: hasta, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: KPIs del periodo
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Dashboard' }
         '400':
           description: '`VALIDACION_FALLIDA`'
           content:
@@ -163,30 +206,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
-  /reportes/ganancias:
+  /salud:
     get:
-      tags: [reportes]
-      summary: Ganancia real por periodo (dashboard)
-      description: Solo considera ventas `CONFIRMADA`.
-      operationId: obtenerGanancias
-      parameters:
-        - $ref: '#/components/parameters/CorrelationId'
-        - { name: desde, in: query, required: true, schema: { type: string, format: date } }
-        - { name: hasta, in: query, required: true, schema: { type: string, format: date } }
-        - { name: agrupacion, in: query, schema: { type: string, enum: [DIA, SEMANA, MES], default: DIA } }
+      tags: [salud]
+      summary: Estado del servicio y del esquema conectado
+      operationId: salud
       responses:
         '200':
-          description: Totales y serie por periodo
+          description: Servicio operativo
           content:
             application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/RespuestaBase'
-                  - type: object
-                    properties:
-                      data: { $ref: '#/components/schemas/ReporteGanancias' }
-        '400':
-          description: '`VALIDACION_FALLIDA`'
+              schema: { $ref: '#/components/schemas/RespuestaBase' }
+        '503':
+          description: '`BASE_DATOS_NO_DISPONIBLE`'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -202,8 +234,8 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Generada por el cliente (frontend) por cada intento de cierre de venta.
-      schema: { type: string, minLength: 8, maxLength: 64 }
+      description: Generada por el frontend, una por intento de cierre de venta.
+      schema: { type: string, minLength: 8, maxLength: 100, pattern: '^[\w\-:.]+$' }
   schemas:
     RespuestaBase:
       type: object
@@ -242,14 +274,16 @@ components:
     ClienteRespaldo:
       type: object
       additionalProperties: false
-      description: Datos mínimos del cliente si ms-clientes no está disponible (degradación).
+      description: Datos mínimos del cliente para vender si ms-clientes no está disponible (degradación).
       required: [tipo_identificacion, identificacion, nombre_completo]
       properties:
         tipo_identificacion: { type: string, enum: [CEDULA, RUC, PASAPORTE, CONSUMIDOR_FINAL] }
         identificacion: { type: string, maxLength: 20 }
         nombre_completo: { type: string, maxLength: 150 }
         telefono: { type: string, maxLength: 25 }
+        email: { type: string, format: email }
         ciudad: { type: string, maxLength: 80 }
+        direccion_referencia: { type: string, maxLength: 500 }
     CrearVenta:
       type: object
       additionalProperties: false
@@ -258,7 +292,7 @@ components:
         cliente_id:
           type: string
           format: uuid
-          description: Si se omite, la venta es a consumidor final.
+          description: Si se omite, la venta es a consumidor final (con `cliente_respaldo` como snapshot si se envía).
         cliente_respaldo: { $ref: '#/components/schemas/ClienteRespaldo' }
         vendedor_id:
           type: string
@@ -270,14 +304,19 @@ components:
         items:
           type: array
           minItems: 1
+          maxItems: 50
           items:
             type: object
             additionalProperties: false
             required: [variante_id, cantidad, precio_venta_unitario]
             properties:
               variante_id: { type: string, format: uuid }
-              cantidad: { type: integer, minimum: 1 }
-              precio_venta_unitario: { $ref: '#/components/schemas/Dinero' }
+              cantidad: { type: integer, minimum: 1, maximum: 1000 }
+              precio_venta_unitario:
+                description: Texto ('45.00') o número (45)
+                oneOf:
+                  - { type: string, pattern: '^\d{1,8}(\.\d{1,2})?$' }
+                  - { type: number, minimum: 0 }
     DetalleVenta:
       type: object
       properties:
@@ -301,6 +340,7 @@ components:
         cliente_snapshot:
           type: object
           additionalProperties: true
+          description: 'Incluye `origen`: `MS_CLIENTES`, `CONSUMIDOR_FINAL`, `RESPALDO_PAYLOAD` o `NO_VERIFICADO`.'
         vendedor_id: { type: string, format: uuid, nullable: true }
         metodo_pago: { $ref: '#/components/schemas/MetodoPago' }
         estado: { $ref: '#/components/schemas/EstadoVenta' }
@@ -309,6 +349,7 @@ components:
         ganancia_total: { $ref: '#/components/schemas/Dinero' }
         observacion: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Venta:
       allOf:
         - $ref: '#/components/schemas/VentaResumen'
@@ -317,31 +358,43 @@ components:
             detalle:
               type: array
               items: { $ref: '#/components/schemas/DetalleVenta' }
-    ReporteGanancias:
+    Dashboard:
       type: object
       properties:
-        desde: { type: string, format: date }
-        hasta: { type: string, format: date }
-        totales:
+        periodo:
           type: object
           properties:
-            ventas: { type: integer }
-            unidades: { type: integer }
-            total_vendido: { $ref: '#/components/schemas/Dinero' }
-            costo_total_jrs: { $ref: '#/components/schemas/Dinero' }
-            ganancia_total: { $ref: '#/components/schemas/Dinero' }
+            desde: { type: string, format: date }
+            hasta: { type: string, format: date }
+            zona_horaria: { type: string, example: America/Guayaquil }
+        ventas_confirmadas: { type: integer, example: 2 }
+        unidades_vendidas: { type: integer, example: 2 }
+        total_vendido: { $ref: '#/components/schemas/Dinero' }
+        costo_total_jrs: { $ref: '#/components/schemas/Dinero' }
+        ganancia_neta: { $ref: '#/components/schemas/Dinero' }
+        margen_porcentaje: { type: string, example: '33.33' }
+        ticket_promedio: { $ref: '#/components/schemas/Dinero' }
         por_metodo_pago:
           type: array
+          description: Siempre los 3 métodos, ordenados por total vendido.
           items:
             type: object
             properties:
               metodo_pago: { $ref: '#/components/schemas/MetodoPago' }
+              ventas: { type: integer }
               total_vendido: { $ref: '#/components/schemas/Dinero' }
-        serie:
+              ganancia_total: { $ref: '#/components/schemas/Dinero' }
+        top_productos:
           type: array
+          maxItems: 5
+          description: Agrupado por producto del snapshot, ordenado por unidades y luego por total.
           items:
             type: object
             properties:
-              periodo: { type: string, example: '2026-11-21' }
+              producto_id: { type: string, format: uuid }
+              nombre: { type: string }
+              marca_equipo: { type: string }
+              temporada_coleccion: { type: string, nullable: true }
+              unidades: { type: integer }
               total_vendido: { $ref: '#/components/schemas/Dinero' }
               ganancia_total: { $ref: '#/components/schemas/Dinero' }

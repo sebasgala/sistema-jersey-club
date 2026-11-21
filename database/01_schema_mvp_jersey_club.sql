@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS ms_inventario.movimientos_stock (
   )
 );
 
+-- v1.1 (2026-11-21): Kardex valorizado. Costo JRS unitario vigente al momento del
+-- movimiento; permite que un reintento idempotente devuelva el costo original.
+ALTER TABLE ms_inventario.movimientos_stock
+  ADD COLUMN IF NOT EXISTS costo_unitario NUMERIC(10,2)
+    CONSTRAINT ck_movimientos_costo CHECK (costo_unitario IS NULL OR costo_unitario >= 0);
+
 CREATE INDEX IF NOT EXISTS ix_movimientos_variante   ON ms_inventario.movimientos_stock (variante_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_movimientos_referencia ON ms_inventario.movimientos_stock (referencia_id);
 
@@ -134,7 +140,17 @@ CREATE TABLE IF NOT EXISTS ms_clientes.clientes (
   )
 );
 
+-- v1.1 (2026-11-21): contacto por correo y operador de envío preferido.
+-- ADD COLUMN IF NOT EXISTS mantiene el script idempotente en bases ya creadas.
+ALTER TABLE ms_clientes.clientes
+  ADD COLUMN IF NOT EXISTS email VARCHAR(150)
+    CONSTRAINT ck_clientes_email CHECK (email IS NULL OR email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$');
+ALTER TABLE ms_clientes.clientes
+  ADD COLUMN IF NOT EXISTS courier_preferido VARCHAR(30) NOT NULL DEFAULT 'SERVIENTREGA'
+    CONSTRAINT ck_clientes_courier CHECK (courier_preferido IN ('SERVIENTREGA', 'LAAR_COURIER', 'ENTREGA_QUITO', 'OTRO'));
+
 CREATE INDEX IF NOT EXISTS ix_clientes_nombre ON ms_clientes.clientes (LOWER(nombre_completo));
+CREATE INDEX IF NOT EXISTS ix_clientes_telefono ON ms_clientes.clientes (telefono);
 CREATE INDEX IF NOT EXISTS ix_clientes_ciudad ON ms_clientes.clientes (ciudad);
 
 DROP TRIGGER IF EXISTS tg_clientes_updated_at ON ms_clientes.clientes;

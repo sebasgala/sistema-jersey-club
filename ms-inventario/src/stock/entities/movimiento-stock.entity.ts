@@ -6,6 +6,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
+import { decimalTransformer } from '../../common/decimal.transformer';
 import { Variante } from '../../variantes/entities/variante.entity';
 
 export const TIPOS_MOVIMIENTO = [
@@ -58,6 +59,17 @@ export class MovimientoStock {
 
   @Column({ type: 'text', nullable: true })
   observacion!: string | null;
+
+  /** Costo JRS unitario vigente al registrar el movimiento (Kardex valorizado). */
+  @Column({
+    name: 'costo_unitario',
+    type: 'numeric',
+    precision: 10,
+    scale: 2,
+    nullable: true,
+    transformer: decimalTransformer,
+  })
+  costoUnitario!: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

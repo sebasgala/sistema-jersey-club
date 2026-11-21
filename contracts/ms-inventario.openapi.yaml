@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Jersey Club — ms-inventario
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Catálogo generalizado (`productos`, `variantes`), stock en tiempo real y Kardex (`movimientos_stock`).
 
@@ -9,9 +9,16 @@ info:
     - Toda respuesta exitosa usa el sobre `{ status, message, data }`.
     - Todo error usa `{ status, error, details[], error_code, correlation_id }`.
     - `X-Correlation-Id` se acepta en toda petición y se devuelve en toda respuesta.
-    - Descuentos, reversiones y ajustes exigen `Idempotency-Key`. Repetir la misma clave devuelve
-      el resultado original (`200` + cabecera `Idempotent-Replayed: true`) sin volver a mover stock.
-    - Un descuento es atómico: o se descuentan todos los ítems o ninguno.
+    - Descuentos, reversiones y ajustes exigen `Idempotency-Key` (8–48 caracteres `[A-Za-z0-9_-:.]`,
+      en la cabecera o en el campo `idempotency_key` del cuerpo; la cabecera tiene prioridad).
+      Repetir la misma clave devuelve el resultado original (`200` + `Idempotent-Replayed: true`)
+      sin volver a mover stock. Reusar una clave con otro contenido → `409 IDEMPOTENCY_KEY_CONFLICTO`.
+    - Un descuento es atómico: o se descuentan todos los ítems o ninguno (`SELECT ... FOR UPDATE`).
+    - Los montos se envían como texto (`"30.00"`) o número (`30`); se responden siempre como texto con 2 decimales.
+    - Textos de catálogo (categoría, talla, versión, parche, dorsal) se guardan en mayúsculas; `2XL` → `XXL`.
+
+    Changelog 1.1.0 (aditivo): filtros `temporada`, `busqueda`, `solo_disponibles`, `sin_costo`; KPIs en
+    `GET /variantes`; `PATCH /variantes/{id}/precios`; `costo_unitario` en movimientos; `GET /salud`.
 servers:
   - url: http://localhost:3011/api/v1
     description: Local directo
@@ -21,6 +28,7 @@ tags:
   - name: productos
   - name: variantes
   - name: stock
+  - name: salud
 paths:
   /productos:
     get:
@@ -31,7 +39,8 @@ paths:
         - $ref: '#/components/parameters/CorrelationId'
         - { name: categoria, in: query, schema: { $ref: '#/components/schemas/Categoria' } }
         - { name: marca_equipo, in: query, schema: { type: string }, description: Coincidencia parcial sin distinguir mayúsculas }
-        - { name: temporada_coleccion, in: query, schema: { type: string, example: '2024-25' } }
+        - { name: temporada, in: query, schema: { type: string, example: '2024-25' }, description: Temporada exacta }
+        - { name: busqueda, in: query, schema: { type: string }, description: Texto libre en nombre o marca/equipo }
         - { name: activo, in: query, schema: { type: boolean, default: true } }
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Limit'
@@ -74,6 +83,11 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/Producto' }
         '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '409':
+          description: 'Ya existe un producto con la misma categoría, nombre, marca y temporada (`PRODUCTO_DUPLICADO`)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /productos/{id}:
     parameters:
       - $ref: '#/components/parameters/Id'
@@ -127,25 +141,31 @@ paths:
   /variantes:
     get:
       tags: [variantes]
-      summary: Buscar variantes (filtros rápidos de inventario)
+      summary: Buscar variantes (filtros rápidos de inventario + KPIs)
+      description: |
+        Orden: marca, nombre, temporada y talla natural (XS, S, M, L, XL, XXL).
+        `kpis` se calcula sobre todo el conjunto filtrado, no solo sobre la página.
       operationId: listarVariantes
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
         - { name: producto_id, in: query, schema: { type: string, format: uuid } }
         - { name: categoria, in: query, schema: { $ref: '#/components/schemas/Categoria' } }
-        - { name: marca_equipo, in: query, schema: { type: string } }
-        - { name: temporada_coleccion, in: query, schema: { type: string } }
-        - { name: talla_medida, in: query, schema: { type: string, example: M } }
+        - { name: marca_equipo, in: query, schema: { type: string }, description: Coincidencia parcial }
+        - { name: temporada, in: query, schema: { type: string, example: '2024-25' }, description: Temporada exacta }
+        - { name: talla_medida, in: query, schema: { type: string, example: M }, description: 'Exacta; `2XL` se interpreta como `XXL`' }
         - { name: version_modelo, in: query, schema: { type: string, example: JUGADOR } }
         - { name: adicional_parche, in: query, schema: { type: string }, description: Coincidencia parcial }
         - { name: adicional_dorsal, in: query, schema: { type: string }, description: Coincidencia parcial }
         - { name: codigo_legacy, in: query, schema: { type: string, example: LTOO2 } }
-        - { name: con_stock, in: query, schema: { type: boolean }, description: '`true` devuelve solo variantes con `stock_actual > 0`' }
+        - { name: busqueda, in: query, schema: { type: string, example: yamal }, description: 'Texto libre en nombre, marca, temporada, código, parche, dorsal u observaciones' }
+        - { name: solo_disponibles, in: query, schema: { type: boolean }, description: '`true` devuelve solo variantes con `stock_actual > 0`' }
+        - { name: sin_costo, in: query, schema: { type: boolean }, description: '`true` devuelve solo variantes con `valor_jersey_club = 0` (costo pendiente)' }
+        - { name: activo, in: query, schema: { type: boolean, default: true } }
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Página de variantes
+          description: Página de variantes con KPIs
           content:
             application/json:
               schema:
@@ -208,7 +228,7 @@ paths:
         '404': { $ref: '#/components/responses/NoEncontrado' }
     patch:
       tags: [variantes]
-      summary: Actualizar datos de la variante (nunca `stock_actual`)
+      summary: Actualizar atributos de la variante (nunca `stock_actual` ni precios)
       operationId: actualizarVariante
       requestBody:
         required: true
@@ -229,6 +249,60 @@ paths:
         '400': { $ref: '#/components/responses/ErrorValidacion' }
         '404': { $ref: '#/components/responses/NoEncontrado' }
         '409': { $ref: '#/components/responses/Conflicto' }
+  /variantes/{id}/precios:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/CorrelationId'
+    patch:
+      tags: [variantes]
+      summary: Actualizar costo JRS (`valor_jersey_club`) y/o PVP sugerido
+      description: |
+        Endpoint ágil para cargar costos pendientes. Al menos uno de los dos campos es obligatorio.
+        Si el PVP queda por debajo del costo, la operación se acepta y `message` incluye una advertencia.
+        Las ventas ya registradas no cambian: su costo quedó congelado en `detalle_ventas`.
+      operationId: actualizarPreciosVariante
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActualizarPrecios' }
+            example: { valor_jersey_club: '27.50', pvp_sugerido: '45.00' }
+      responses:
+        '200':
+          description: Precios actualizados
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/VarianteConProducto' }
+        '400': { $ref: '#/components/responses/ErrorValidacion' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /salud:
+    get:
+      tags: [salud]
+      summary: Estado del servicio y del esquema conectado
+      operationId: salud
+      responses:
+        '200':
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          servicio: { type: string, example: ms-inventario }
+                          esquema: { type: string, example: ms_inventario }
+                          base_datos: { type: string, example: OK }
+        '503': { $ref: '#/components/responses/NoDisponible' }
 
   /stock/descuentos:
     post:
@@ -236,10 +310,15 @@ paths:
       summary: Descontar stock de forma atómica (usado por ms-ventas)
       description: |
         En una sola transacción: bloquea cada variante (`SELECT ... FOR UPDATE`), verifica
-        `stock_actual >= cantidad`, descuenta y registra un movimiento `VENTA` por ítem.
-        Si cualquier ítem no tiene stock, no se descuenta nada y se responde `409`.
+        `stock_actual >= cantidad`, descuenta y registra un movimiento `VENTA` por ítem (con el
+        `costo_unitario` vigente). Si cualquier ítem no tiene stock, hace ROLLBACK y responde `409`
+        detallando cada variante que falló. Una variante repetida en `items` se descuenta por la suma.
         Cada movimiento se guarda con `idempotency_key = "<Idempotency-Key>:<variante_id>"`.
-        La respuesta incluye el snapshot de cada variante para que ms-ventas lo congele.
+        La respuesta incluye el snapshot de cada variante para que ms-ventas lo congele; en una
+        repetición idempotente `valor_jersey_club` es el costo congelado en el movimiento original.
+
+        Códigos 409: `STOCK_INSUFICIENTE`, `VARIANTE_INACTIVA`, `IDEMPOTENCY_KEY_CONFLICTO`,
+        `REFERENCIA_YA_DESCONTADA` (la referencia ya tiene un descuento con otra clave).
       operationId: crearDescuento
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -283,7 +362,9 @@ paths:
       summary: Revertir el descuento de una venta (compensación de la saga)
       description: |
         Devuelve al stock lo descontado para `referencia_id` y registra un movimiento
-        `REVERSION_VENTA` por ítem. Si ya estaba revertido responde `200` sin mover stock.
+        `REVERSION_VENTA` por ítem (al mismo costo del descuento). Es idempotente por referencia:
+        si ya estaba revertido (con cualquier clave) responde `200` sin mover stock, también ante
+        reversiones concurrentes.
       operationId: crearReversion
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -326,7 +407,8 @@ paths:
   /stock/ajustes:
     post:
       tags: [stock]
-      summary: Ajuste manual de inventario (entrada o salida)
+      summary: Entrada de mercadería o ajuste manual de inventario
+      description: '`AJUSTE_SALIDA` mayor al stock disponible → `409 STOCK_INSUFICIENTE`. El motivo queda en el Kardex.'
       operationId: crearAjuste
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -399,8 +481,8 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: Clave única de la operación (ms-ventas usa el id de la venta).
-      schema: { type: string, minLength: 8, maxLength: 64 }
+      description: 'Clave única de la operación (ms-ventas usa el id de la venta). Alternativa: `idempotency_key` en el cuerpo.'
+      schema: { type: string, minLength: 8, maxLength: 48, pattern: '^[\w\-:.]+$' }
     Id:
       name: id
       in: path
@@ -562,16 +644,31 @@ components:
     ActualizarVariante:
       type: object
       additionalProperties: false
-      description: '`stock_actual` no es editable; solo cambia por movimientos de stock.'
+      description: '`stock_actual` no es editable (solo por movimientos); los precios van por `PATCH /variantes/{id}/precios`.'
       properties:
+        codigo_legacy: { type: string, maxLength: 30 }
         talla_medida: { type: string, maxLength: 20 }
         version_modelo: { type: string, maxLength: 30 }
         adicional_parche: { type: string, maxLength: 150, nullable: true }
         adicional_dorsal: { type: string, maxLength: 100, nullable: true }
         observaciones: { type: string, nullable: true }
+        activo: { type: boolean }
+    ActualizarPrecios:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
         valor_jersey_club: { $ref: '#/components/schemas/Dinero' }
         pvp_sugerido: { $ref: '#/components/schemas/Dinero' }
-        activo: { type: boolean }
+    KpisInventario:
+      type: object
+      properties:
+        total_skus: { type: integer, example: 95 }
+        skus_con_stock: { type: integer, example: 71 }
+        unidades_stock: { type: integer, example: 153 }
+        valorizacion_costo_jrs: { $ref: '#/components/schemas/Dinero' }
+        valorizacion_pvp: { $ref: '#/components/schemas/Dinero' }
+        skus_sin_costo: { type: integer, example: 80 }
     PaginaProductos:
       type: object
       properties:
@@ -586,11 +683,13 @@ components:
           type: array
           items: { $ref: '#/components/schemas/VarianteConProducto' }
         meta: { $ref: '#/components/schemas/MetaPaginacion' }
+        kpis: { $ref: '#/components/schemas/KpisInventario' }
     SolicitudDescuento:
       type: object
       additionalProperties: false
       required: [referencia_id, items]
       properties:
+        idempotency_key: { type: string, minLength: 8, maxLength: 48, description: Alternativa a la cabecera Idempotency-Key }
         referencia_id: { type: string, format: uuid, description: Id de la venta en ms-ventas }
         items:
           type: array
@@ -628,6 +727,10 @@ components:
         cantidad: { type: integer, description: Siempre positiva; el tipo indica el sentido }
         stock_anterior: { type: integer }
         stock_nuevo: { type: integer }
+        costo_unitario:
+          allOf: [{ $ref: '#/components/schemas/Dinero' }]
+          nullable: true
+          description: Costo JRS unitario vigente al registrar el movimiento (Kardex valorizado)
         idempotency_key: { type: string, nullable: true }
         referencia_id: { type: string, format: uuid, nullable: true }
         observacion: { type: string, nullable: true }
@@ -648,6 +751,7 @@ components:
       additionalProperties: false
       required: [referencia_id]
       properties:
+        idempotency_key: { type: string, minLength: 8, maxLength: 48, description: Alternativa a la cabecera Idempotency-Key }
         referencia_id: { type: string, format: uuid }
         motivo: { type: string, maxLength: 300 }
     ResultadoMovimientos:
@@ -662,6 +766,7 @@ components:
       additionalProperties: false
       required: [variante_id, tipo, cantidad, observacion]
       properties:
+        idempotency_key: { type: string, minLength: 8, maxLength: 48, description: Alternativa a la cabecera Idempotency-Key }
         variante_id: { type: string, format: uuid }
         tipo:
           type: string

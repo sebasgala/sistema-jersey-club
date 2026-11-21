@@ -57,7 +57,8 @@ sistema-jersey-club/
 ├── ms-inventario/         # Microservicio NestJS de inventario
 ├── ms-ventas/             # Microservicio NestJS de ventas
 ├── ms-clientes/           # Microservicio NestJS de clientes
-├── gateway/               # API Gateway NestJS
+├── gateway/               # API Gateway NestJS (JWT + enrutamiento)
+├── pruebas-e2e/           # Prueba end-to-end del flujo comercial
 └── frontend-web/          # Next.js + Tailwind CSS
 ```
 
@@ -80,7 +81,7 @@ Elegidos para no chocar con otros proyectos de la máquina de desarrollo. No se 
 
 ## Puesta en marcha local
 
-> Estado actual: contratos, esquema SQL, migración del Excel, PostgreSQL en Docker y los 3 microservicios con su configuración base y entidades (sin endpoints de negocio todavía). `gateway` y `frontend-web` están pendientes.
+> Estado actual: los 3 microservicios con su lógica de negocio completa y el gateway con JWT, verificados con la prueba end-to-end. `frontend-web` está pendiente.
 
 ### Requisitos
 
@@ -97,9 +98,17 @@ cp .env.example               .env            # credenciales del contenedor Post
 cp ms-inventario/.env.example ms-inventario/.env
 cp ms-ventas/.env.example     ms-ventas/.env
 cp ms-clientes/.env.example   ms-clientes/.env
+cp gateway/.env.example       gateway/.env
 ```
 
 Cada servicio usa `DB_SCHEMA` para conectarse solo a su esquema (`ms_inventario`, `ms_ventas`, `ms_clientes`). `ms-ventas` además define `INVENTARIO_URL` y `CLIENTES_URL`.
+
+En `gateway/.env` define el administrador y el secreto JWT. La contraseña nunca se guarda en claro, solo su hash scrypt:
+
+```bash
+cd gateway && npm run hash-password -- "tu-contraseña-segura"   # pega el resultado en ADMIN_PASSWORD_HASH
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # valor para JWT_SECRET
+```
 
 ### 2. Levantar PostgreSQL y cargar datos
 
@@ -126,12 +135,10 @@ python -I scripts-migracion/limpiar_y_migrar_excel.py
 
 Produce `scripts-migracion/STOCK_LIMPIO_2026.xlsx` (datos depurados más la hoja `REPORTE_DEPURACION` con cada corrección aplicada) y vuelve a escribir el seed. Los UUID son deterministas: regenerar no duplica datos.
 
-### 4. Compilar y arrancar los microservicios
+### 4. Compilar y arrancar los microservicios y el gateway
 
 ```bash
-cd ms-inventario && npm install && npm run build && cd ..
-cd ms-ventas     && npm install && npm run build && cd ..
-cd ms-clientes   && npm install && npm run build && cd ..
+for s in ms-inventario ms-ventas ms-clientes gateway; do (cd $s && npm install && npm run build); done
 ```
 
 En terminales separadas:
@@ -140,12 +147,42 @@ En terminales separadas:
 cd ms-inventario && npm run start:dev
 cd ms-ventas     && npm run start:dev
 cd ms-clientes   && npm run start:dev
+cd gateway       && npm run start:dev
 ```
 
 ### 5. Verificar
 
-- `GET http://localhost:<puerto>/api/v1/salud` devuelve el servicio y el esquema conectado.
-- Swagger de cada servicio en `http://localhost:<puerto>/api/docs`.
+- `GET http://localhost:3010/api/v1/salud` muestra el estado del gateway y de los 3 servicios.
+- `POST http://localhost:3010/api/v1/auth/login` con `{ "usuario": "admin", "contrasena": "..." }` devuelve el JWT; el resto de rutas exige `Authorization: Bearer <token>`.
+- Swagger de cada componente en `http://localhost:<puerto>/api/docs`.
+
+### 6. Prueba end-to-end
+
+Con PostgreSQL arriba, los 4 proyectos compilados y los puertos 3010–3013 libres:
+
+```bash
+E2E_ADMIN_PASSWORD='tu-contraseña' node pruebas-e2e/flujo-venta.e2e.mjs
+```
+
+El script levanta los 4 procesos y recorre todo el flujo a través del gateway: login, filtros y KPIs, alta de productos, variantes y clientes, venta, reintento idempotente, `409` sin stock, dos ventas simultáneas por la última unidad, compensación, dashboard y venta con `ms-clientes` caído. Comprueba cada efecto en PostgreSQL, borra los datos de prueba, verifica que el inventario del Excel quedó idéntico (huella antes/después) y detiene los procesos.
+
+---
+
+## Endpoints (vía gateway `http://localhost:3010/api/v1`)
+
+| Método y ruta | Servicio | Uso |
+|---|---|---|
+| `POST /auth/login` · `GET /salud` | gateway | JWT del administrador · estado de los servicios (públicos) |
+| `GET /variantes` | inventario | Filtros (`categoria`, `marca_equipo`, `temporada`, `talla_medida`, `version_modelo`, `adicional_parche`, `adicional_dorsal`, `busqueda`, `solo_disponibles`, `sin_costo`) + KPIs |
+| `POST /productos` · `POST /variantes` · `PATCH /variantes/:id` | inventario | Catálogo, respetando el índice único de la variante exacta |
+| `PATCH /variantes/:id/precios` | inventario | Carga ágil de `valor_jersey_club` y `pvp_sugerido` |
+| `POST /stock/ajustes` · `GET /stock/movimientos` | inventario | Entradas y ajustes manuales · Kardex |
+| `POST /stock/descuentos` · `POST /stock/reversiones` | inventario | Descuento atómico y compensación (usados por ms-ventas) |
+| `GET /clientes?busqueda=` · `GET /clientes/identificacion/:id` · `POST` · `PATCH` | clientes | Búsqueda y alta con validación ecuatoriana |
+| `POST /ventas` | ventas | Cierre en un clic (requiere `Idempotency-Key`) |
+| `GET /ventas` · `GET /ventas/:id` · `GET /ventas/dashboard` | ventas | Historial y KPIs del dashboard |
+
+Detalle completo en [contracts/](contracts/).
 
 ---
 

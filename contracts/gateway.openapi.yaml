@@ -1,0 +1,122 @@
+openapi: 3.0.3
+info:
+  title: Jersey Club — gateway
+  version: 1.0.0
+  description: |
+    Punto único de entrada (`http://localhost:3010/api/v1`).
+
+    **Autenticación:** todas las rutas exigen `Authorization: Bearer <JWT>` salvo `POST /auth/login`
+    y `GET /salud`. Sin token o con token inválido → `401 NO_AUTENTICADO` / `TOKEN_INVALIDO`.
+
+    **Enrutamiento** (mismo path y query string hacia el servicio dueño):
+
+    | Prefijo | Servicio | Contrato |
+    |---|---|---|
+    | `/productos`, `/variantes`, `/stock` | ms-inventario (:3011) | `ms-inventario.openapi.yaml` |
+    | `/ventas` | ms-ventas (:3012) | `ms-ventas.openapi.yaml` |
+    | `/clientes` | ms-clientes (:3013) | `ms-clientes.openapi.yaml` |
+
+    **Cabeceras:** propaga `Idempotency-Key`, `Content-Type` y `X-Correlation-Id` (lo genera si no llega);
+    agrega `X-Usuario` con el usuario del token. Devuelve `Location`, `Idempotent-Replayed` y `X-Correlation-Id`.
+    El cuerpo y el código HTTP del servicio se devuelven sin cambios.
+
+    **Errores propios:** `503 SERVICIO_NO_DISPONIBLE` si el servicio no responde, `504 TIEMPO_AGOTADO`
+    si supera 15 s, `404` para rutas desconocidas, `429 DEMASIADOS_INTENTOS` tras 5 logins fallidos
+    por IP en 15 minutos. Formato `{ status, error, details[], error_code, correlation_id }`.
+servers:
+  - url: http://localhost:3010/api/v1
+    description: Local
+tags:
+  - name: auth
+  - name: salud
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Iniciar sesión como administrador
+      description: Usuario y hash scrypt de la contraseña se configuran en `gateway/.env` (`ADMIN_USUARIO`, `ADMIN_PASSWORD_HASH`).
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [usuario, contrasena]
+              properties:
+                usuario: { type: string, maxLength: 100, example: admin }
+                contrasena: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: Sesión iniciada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: integer, example: 200 }
+                  message: { type: string, example: Sesión iniciada }
+                  data:
+                    type: object
+                    properties:
+                      access_token: { type: string }
+                      token_type: { type: string, example: Bearer }
+                      expires_in: { type: integer, example: 28800, description: Segundos }
+                      usuario:
+                        type: object
+                        properties:
+                          nombre: { type: string }
+                          rol: { type: string, example: ADMIN }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /salud:
+    get:
+      tags: [salud]
+      summary: Estado del gateway y de cada microservicio
+      operationId: salud
+      security: []
+      responses:
+        '200':
+          description: Estado agregado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: integer }
+                  message: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      gateway: { type: string, example: OK }
+                      servicios:
+                        type: object
+                        additionalProperties: { type: string, example: OK }
+                        example: { ms-inventario: OK, ms-ventas: OK, ms-clientes: NO_DISPONIBLE }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Error:
+      description: Error uniforme
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status, error, details, error_code, correlation_id]
+            properties:
+              status: { type: integer }
+              error: { type: string }
+              details:
+                type: array
+                items: { type: string }
+              error_code: { type: string }
+              correlation_id: { type: string, format: uuid }
