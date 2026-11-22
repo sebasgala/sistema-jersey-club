@@ -43,7 +43,15 @@ export class VariantesService {
       this.repo.createQueryBuilder('v').innerJoinAndSelect('v.producto', 'p'),
       filtro,
     )
-      .orderBy('p.marca_equipo', 'ASC')
+      // Con búsqueda de texto, el código exacto (LTOO5) va antes que los parecidos (LTOO50, LTOO52…).
+      .orderBy(
+        filtro.busqueda
+          ? 'CASE WHEN UPPER(v.codigo_legacy) = UPPER(:exacto) THEN 0 ELSE 1 END'
+          : 'p.marca_equipo',
+        'ASC',
+      )
+      .setParameter('exacto', (filtro.busqueda ?? '').trim())
+      .addOrderBy('p.marca_equipo', 'ASC')
       .addOrderBy('p.nombre', 'ASC')
       .addOrderBy('p.temporada_coleccion', 'ASC', 'NULLS LAST')
       .addOrderBy(ORDEN_TALLA, 'ASC')

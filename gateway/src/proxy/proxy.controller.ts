@@ -13,6 +13,7 @@ import { firstValueFrom } from 'rxjs';
 import { Publica, type RequestAutenticada } from '../auth/auth.guard';
 import type { RequestConCorrelacion } from '../common/correlation-id.middleware';
 import { Respuesta } from '../common/respuesta.interceptor';
+import { ocultarCostos, rolPermitido } from './permisos';
 
 type Servicio = 'inventario' | 'ventas' | 'clientes';
 
@@ -100,14 +101,44 @@ export class ProxyController {
       return;
     }
 
+    const usuario = req.usuario;
+    if (!usuario) {
+      this.error(
+        res,
+        401,
+        'NO_AUTENTICADO',
+        ['Sesión no válida'],
+        correlationId,
+      );
+      return;
+    }
+    const segmentos = req.path
+      .replace(/^\/api\/v1\//, '')
+      .split('/')
+      .filter(Boolean);
+    if (!rolPermitido(usuario.role, req.method, segmentos)) {
+      this.error(
+        res,
+        403,
+        'ROL_NO_AUTORIZADO',
+        [
+          `El rol ${usuario.role} no puede ejecutar ${req.method} /${segmentos.join('/')}`,
+        ],
+        correlationId,
+      );
+      return;
+    }
+
+    // Solo se reenvían cabeceras de la lista blanca: un X-User-Id enviado por el cliente nunca llega a los servicios.
     const headers: Record<string, string> = {
       'X-Correlation-Id': correlationId,
+      'X-User-Id': usuario.sub,
+      'X-User-Role': usuario.role,
     };
     for (const h of CABECERAS_IDA) {
       const valor = req.headers[h];
       if (typeof valor === 'string') headers[h] = valor;
     }
-    if (req.usuario) headers['X-Usuario'] = req.usuario.sub;
     const conCuerpo = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
 
     try {
@@ -128,7 +159,20 @@ export class ProxyController {
         const valor = r.headers[h] as string | undefined;
         if (valor) res.setHeader(h, valor);
       }
-      res.send(Buffer.from(r.data));
+      const cuerpo = Buffer.from(r.data);
+      const esJson = String(r.headers['content-type'] ?? '').includes(
+        'application/json',
+      );
+      if (usuario.role === 'VENDEDOR' && esJson && cuerpo.length) {
+        // Un vendedor no recibe costos ni ganancias en ninguna respuesta.
+        try {
+          res.json(ocultarCostos(JSON.parse(cuerpo.toString('utf8'))));
+          return;
+        } catch {
+          /* no era JSON válido: se envía tal cual */
+        }
+      }
+      res.send(cuerpo);
     } catch (e) {
       const codigo = e instanceof AxiosError ? e.code : undefined;
       const timeout = codigo === 'ECONNABORTED' || codigo === 'ETIMEDOUT';
@@ -157,6 +201,8 @@ export class ProxyController {
     correlationId: string,
   ): void {
     const nombres: Record<number, string> = {
+      401: 'Unauthorized',
+      403: 'Forbidden',
       404: 'Not Found',
       503: 'Service Unavailable',
       504: 'Gateway Timeout',

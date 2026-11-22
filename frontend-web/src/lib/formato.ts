@@ -32,6 +32,11 @@ export function numero(n: number): string {
   return entero.format(n);
 }
 
+/** `plural(1, "venta")` → "1 venta"; `plural(2, "venta")` → "2 ventas". */
+export function plural(n: number, singular: string, plural = `${singular}s`): string {
+  return `${entero.format(n)} ${n === 1 ? singular : plural}`;
+}
+
 /** Margen sobre el precio de venta, en % con 1 decimal; null si no hay precio. */
 export function margen(costoCentavos: number, precioCentavos: number): number | null {
   if (!precioCentavos) return null;
@@ -92,11 +97,21 @@ export function rasgos(v: {
   ];
 }
 
+const SIGLAS = new Set(["FC", "SC", "AC", "CF", "MLS", "FIFA", "UEFA", "RLS", "USA", "F1"]);
+
+/**
+ * Pasa TEXTO EN MAYÚSCULAS a formato título («LOCAL» → «Local») sin dañar lo que ya viene bien escrito:
+ * «FC Barcelona» y «Inter de Miami» quedan igual, y las siglas conocidas se conservan («FC», «MLS»).
+ */
 export function titulo(texto: string): string {
-  return texto
-    .toLowerCase()
-    .replace(/_/g, " ")
-    .replace(/(^|[\s(])(\p{L})/gu, (_m, a: string, b: string) => a + b.toUpperCase());
+  return texto.replace(/_/g, " ").replace(/[\p{L}\p{N}]+/gu, (palabra) => {
+    const mayus = palabra.toUpperCase();
+    if (SIGLAS.has(mayus)) return mayus;
+    if (palabra === mayus && palabra.length > 1 && /\p{L}/u.test(palabra)) {
+      return palabra.charAt(0) + palabra.slice(1).toLowerCase();
+    }
+    return palabra;
+  });
 }
 
 export function uuid(): string {

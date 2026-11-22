@@ -91,7 +91,8 @@ export default function NuevaVenta() {
       unidades += l.cantidad;
     }
     const sinCosto = lineas.some((l) => aCentavos(l.variante.valor_jersey_club) === 0);
-    return { total, costo, unidades, precioInvalido, sinCosto };
+    const todoSinCosto = lineas.length > 0 && lineas.every((l) => aCentavos(l.variante.valor_jersey_club) === 0);
+    return { total, costo, unidades, precioInvalido, sinCosto, todoSinCosto };
   }, [lineas]);
 
   const excedeStock = lineas.some((l) => l.cantidad > l.variante.stock_actual);
@@ -224,7 +225,7 @@ export default function NuevaVenta() {
               className="h-12 w-full rounded-[var(--radius-placa)] border border-linea bg-papel pr-3 pl-10 text-[1rem] focus:border-tinta focus:bg-blanco focus:ring-2 focus:ring-tinta/12 focus:outline-none"
             />
           </label>
-          <ul className={cx("flex max-h-[22rem] flex-col overflow-y-auto rounded-[var(--radius-placa)] border border-linea transition-opacity", resultados.cargando && resultados.datos && "opacity-60")}>
+          <ul className={cx("flex max-h-[22rem] flex-col overflow-y-auto border-y border-linea-2 transition-opacity", resultados.cargando && resultados.datos && "opacity-60")}>
             {resultados.error ? (
               <li className="p-3"><Aviso tono="error" titulo="No se pudo buscar en el inventario">{mensajeError(resultados.error)}</Aviso></li>
             ) : !resultados.datos ? (
@@ -245,15 +246,15 @@ export default function NuevaVenta() {
                     >
                       <span className="cifra rounded bg-tinta px-1.5 py-0.5 text-[0.8rem] font-bold text-blanco">{v.codigo_legacy ?? "S/C"}</span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate font-semibold">{titulo(nombreProducto(v))}</span>
-                        <span className="block truncate text-[0.8rem] text-gris">{rasgos(v).join(" · ")}</span>
+                        <span className="block font-semibold">{titulo(nombreProducto(v))}</span>
+                        <span className="block text-[0.8rem] text-gris">{rasgos(v).join(" · ")}</span>
                       </span>
                       <span className="flex flex-col items-end gap-1">
                         <EstadoStock stock={v.stock_actual - enCarrito} compacto />
                         {aCentavos(v.pvp_sugerido) ? (
                           <span className="cifra text-[0.95rem] font-bold">{dinero(v.pvp_sugerido)}</span>
                         ) : (
-                          <span className="text-[0.75rem] font-semibold text-gris">Sin PVP</span>
+                          <span className="text-[0.78rem] font-semibold text-gris">Sin PVP</span>
                         )}
                       </span>
                       <span className={cx("grid size-9 shrink-0 place-items-center rounded-full", lleno ? "bg-linea-2 text-gris" : "bg-tinta text-blanco")}>
@@ -322,7 +323,7 @@ export default function NuevaVenta() {
                   onClick={() => setPago(valor)}
                   className={cx(
                     "flex min-h-24 flex-col items-center justify-center gap-2 rounded-[var(--radius-placa)] border-2 px-1 text-[0.9rem] font-semibold transition-[background-color,border-color,transform] active:scale-[0.98]",
-                    pago === valor ? "metal border-tinta" : intentado && !pago ? "border-error/60 bg-blanco" : "border-linea bg-blanco hover:border-tinta/40",
+                    pago === valor ? "border-tinta bg-tinta text-blanco" : intentado && !pago ? "border-error/60 bg-blanco" : "border-linea bg-blanco hover:border-tinta/40",
                   )}
                 >
                   <Icono className="size-6" />
@@ -349,9 +350,9 @@ export default function NuevaVenta() {
               </div>
               {dueno && lineas.length > 0 && (
                 <div className="mt-3 grid grid-cols-3 gap-2 border-t border-tinta-3 pt-3 text-[0.8rem] text-humo">
-                  <span>Costo JRS<b className="cifra block text-[1.1rem] text-blanco">{dineroCentavos(totales.costo)}</b></span>
-                  <span>Ganancia<b className={cx("cifra block text-[1.1rem]", totales.total - totales.costo < 0 ? "text-[#ff9aa3]" : "text-blanco")}>{dineroCentavos(totales.total - totales.costo)}</b></span>
-                  <span>Margen<b className="cifra block text-[1.1rem] text-blanco">{porcentaje(margenTotal)}</b></span>
+                  <span>{totales.sinCosto && !totales.todoSinCosto ? "Costo JRS · parcial" : "Costo JRS"}<b className="cifra block text-[1.1rem] text-blanco">{totales.todoSinCosto ? "Sin cargar" : dineroCentavos(totales.costo)}</b></span>
+                  <span>{totales.sinCosto ? "Ganancia · parcial" : "Ganancia"}<b className={cx("cifra block text-[1.1rem]", totales.total - totales.costo < 0 ? "text-[#ff9aa3]" : totales.sinCosto ? "text-[#f3c56b]" : "text-blanco")}>{dineroCentavos(totales.total - totales.costo)}</b></span>
+                  <span>{totales.sinCosto && !totales.todoSinCosto ? "Margen · parcial" : "Margen"}<b className="cifra block text-[1.1rem] text-blanco">{totales.todoSinCosto ? "—" : porcentaje(margenTotal)}</b></span>
                 </div>
               )}
               {dueno && totales.sinCosto && (
@@ -363,7 +364,7 @@ export default function NuevaVenta() {
             {intentado && faltantes.length > 0 && !error && (
               <p className="text-[0.88rem] font-medium text-error">Para confirmar: {faltantes.join(", ")}.</p>
             )}
-            <Boton tamano="lg" variante="metal" className="w-full border-2 border-tinta text-[1.05rem]" cargando={enviando} icono={Check} onClick={() => void confirmar()}>
+            <Boton tamano="lg" className="w-full text-[1.05rem]" cargando={enviando} icono={Check} onClick={() => void confirmar()}>
               Confirmar venta · {dineroCentavos(totales.total)}
             </Boton>
           </section>
@@ -374,7 +375,7 @@ export default function NuevaVenta() {
 }
 
 function Paso({ n }: { n: number }) {
-  return <span className="metal grid size-7 place-items-center rounded-full text-[0.95rem] font-extrabold">{n}</span>;
+  return <span className="grid size-7 place-items-center rounded-full bg-tinta text-[0.95rem] font-extrabold text-blanco">{n}</span>;
 }
 
 function LineaCarrito({
@@ -397,14 +398,14 @@ function LineaCarrito({
   const precioMalo = intentado && (!l.precio || Number.isNaN(aCentavos(l.precio)) || aCentavos(l.precio) <= 0);
   const subtotal = Number.isNaN(aCentavos(l.precio)) ? 0 : aCentavos(l.precio) * l.cantidad;
   return (
-    <li className={cx("animate-entrar rounded-[var(--radius-placa)] border p-3", error || excede ? "border-error bg-error-fondo/40" : "border-linea bg-papel/60")}>
+    <li className={cx("animate-entrar border-t py-3", error || excede ? "-mx-2 border-error/50 bg-error-fondo/40 px-2" : "border-linea-2")}>
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate font-semibold">
+          <p className="font-semibold">
             <span className="cifra mr-1.5 text-gris">{l.variante.codigo_legacy}</span>
             {titulo(nombreProducto(l.variante))}
           </p>
-          <p className="truncate text-[0.8rem] text-gris">{rasgos(l.variante).join(" · ")}</p>
+          <p className="text-[0.8rem] text-gris">{rasgos(l.variante).join(" · ")}</p>
         </div>
         <button type="button" onClick={alQuitar} aria-label="Quitar del carrito" className="-mt-1 -mr-1 grid size-9 place-items-center rounded-full text-gris hover:bg-tinta/6 hover:text-error">
           <Trash2 className="size-4" />
@@ -412,7 +413,7 @@ function LineaCarrito({
       </div>
       <div className="mt-2.5 flex flex-wrap items-end gap-3">
         <div>
-          <p className="mb-1 text-[0.72rem] font-semibold text-gris">Cantidad · máx. {stock}</p>
+          <p className="mb-1 text-[0.78rem] font-semibold text-gris">Cantidad · máx. {stock}</p>
           <div className="flex items-center rounded-[var(--radius-placa)] border border-linea bg-blanco">
             <button type="button" aria-label="Restar una" disabled={l.cantidad <= 1} onClick={() => alCambiar({ cantidad: l.cantidad - 1 })} className="grid size-10 place-items-center disabled:text-plata-2">
               <Minus className="size-4" />
@@ -430,7 +431,7 @@ function LineaCarrito({
             </button>
           </div>
         </div>
-        <label className="flex w-32 flex-col gap-1 text-[0.72rem] font-semibold text-gris">
+        <label className="flex w-32 flex-col gap-1 text-[0.78rem] font-semibold text-gris">
           Precio de venta
           <span className="relative">
             <span className="absolute inset-y-0 left-2.5 flex items-center text-gris">$</span>

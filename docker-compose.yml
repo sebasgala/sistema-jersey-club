@@ -1,6 +1,20 @@
 # Sistema Jersey Club — entorno local
 # Puertos asignados en CLAUDE.md. Las credenciales se leen de .env (ver .env.example).
+#
+#   Solo la base de datos (uso diario con los servicios en `npm run start:dev`):
+#     docker compose up -d pg-jersey-club
+#
+#   Stack completo en contenedores (misma topología que producción):
+#     docker compose --profile stack up -d --build
+#   Solo el gateway publica puerto (3010); los microservicios quedan en la red interna.
 name: jersey-club
+
+x-servicio: &servicio
+  restart: unless-stopped
+  profiles: ["stack"]
+  depends_on:
+    pg-jersey-club:
+      condition: service_healthy
 
 services:
   pg-jersey-club:
@@ -25,6 +39,93 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  ms-inventario:
+    <<: *servicio
+    build: ./ms-inventario
+    image: jersey-club/ms-inventario:local
+    container_name: ms-inventario
+    environment:
+      SERVICE_NAME: ms-inventario
+      PORT: "3011"
+      DB_HOST: pg-jersey-club
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: ms_inventario
+      LOG_JSON: "true"
+
+  ms-clientes:
+    <<: *servicio
+    build: ./ms-clientes
+    image: jersey-club/ms-clientes:local
+    container_name: ms-clientes
+    environment:
+      SERVICE_NAME: ms-clientes
+      PORT: "3013"
+      DB_HOST: pg-jersey-club
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: ms_clientes
+      LOG_JSON: "true"
+
+  ms-ventas:
+    <<: *servicio
+    build: ./ms-ventas
+    image: jersey-club/ms-ventas:local
+    container_name: ms-ventas
+    environment:
+      SERVICE_NAME: ms-ventas
+      PORT: "3012"
+      DB_HOST: pg-jersey-club
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: ms_ventas
+      INVENTARIO_URL: http://ms-inventario:3011/api/v1
+      CLIENTES_URL: http://ms-clientes:3013/api/v1
+      INVENTARIO_TIMEOUT_MS: "3000"
+      CLIENTES_TIMEOUT_MS: "2000"
+      LOG_JSON: "true"
+
+  gateway:
+    <<: *servicio
+    build: ./gateway
+    image: jersey-club/gateway:local
+    container_name: gateway
+    environment:
+      SERVICE_NAME: gateway
+      PORT: "3010"
+      INVENTARIO_URL: http://ms-inventario:3011
+      VENTAS_URL: http://ms-ventas:3012
+      CLIENTES_URL: http://ms-clientes:3013
+      GATEWAY_TIMEOUT_MS: "15000"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3014}
+      # Obligatorio para el perfil "stack": mínimo 32 caracteres aleatorios.
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRES_IN_SEGUNDOS: ${JWT_EXPIRES_IN_SEGUNDOS:-28800}
+      DB_HOST: pg-jersey-club
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_SCHEMA: ms_auth
+      LOG_JSON: "true"
+    ports:
+      - "3010:3010"
+    depends_on:
+      pg-jersey-club:
+        condition: service_healthy
+      ms-inventario:
+        condition: service_healthy
+      ms-clientes:
+        condition: service_healthy
+      ms-ventas:
+        condition: service_healthy
 
 volumes:
   pg_jersey_club_data:

@@ -12,7 +12,7 @@ import {
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { cambiarPerfil, cerrarSesion, useSesion, type Perfil } from "@/lib/sesion";
+import { cerrarSesion, ETIQUETA_ROL, iniciales, useSesion } from "@/lib/sesion";
 import { Isotipo, Marca } from "./marca";
 import { Boton, cx, Hoja } from "./ui";
 
@@ -32,29 +32,11 @@ function activo(ruta: string, href: string): boolean {
   return ruta.startsWith(href.replace(/\/$/, ""));
 }
 
-export function SelectorPerfil({ perfil, oscuro = false }: { perfil: Perfil; oscuro?: boolean }) {
+function Avatar({ nombre, className }: { nombre: string; className?: string }) {
   return (
-    <div
-      role="radiogroup"
-      aria-label="Vista"
-      className={cx("grid grid-cols-2 rounded-full p-1 text-[0.82rem] font-semibold", oscuro ? "bg-tinta-2" : "bg-linea-2")}
-    >
-      {(["DUENO", "VENDEDOR"] as const).map((p) => (
-        <button
-          key={p}
-          type="button"
-          role="radio"
-          aria-checked={perfil === p}
-          onClick={() => cambiarPerfil(p)}
-          className={cx(
-            "h-8 rounded-full px-3 transition-colors",
-            perfil === p ? "metal" : oscuro ? "text-humo hover:text-blanco" : "text-gris hover:text-tinta",
-          )}
-        >
-          {p === "DUENO" ? "Dueño" : "Vendedor"}
-        </button>
-      ))}
-    </div>
+    <span aria-hidden className={cx("grid shrink-0 place-items-center rounded-full bg-tinta-3 text-[0.85rem] font-extrabold text-blanco ring-1 ring-plata-3/50", className ?? "size-9")}>
+      {iniciales(nombre)}
+    </span>
   );
 }
 
@@ -96,7 +78,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <Link
             href="/ventas/nueva/"
             className={cx(
-              "metal flex h-12 items-center justify-center gap-2 rounded-[var(--radius-placa)] font-bold transition-[filter] hover:brightness-105",
+              "flex h-12 items-center justify-center gap-2 rounded-[var(--radius-placa)] bg-blanco font-bold text-tinta transition-colors hover:bg-plata-1",
               vendiendo && "ring-2 ring-plata-2 ring-offset-2 ring-offset-tinta",
             )}
           >
@@ -124,15 +106,16 @@ export function Shell({ children }: { children: ReactNode }) {
           })}
         </nav>
         <div className="mt-auto flex flex-col gap-3 border-t border-tinta-3 px-4 py-5">
-          <SelectorPerfil perfil={sesion.perfil} oscuro />
-          <div className="flex items-center justify-between gap-2 text-[0.85rem]">
-            <span className="truncate text-humo">
-              Sesión: <b className="text-blanco">{sesion.usuario}</b>
-            </span>
-            <button type="button" onClick={salir} className="flex items-center gap-1.5 rounded px-2 py-1.5 text-humo hover:text-blanco">
-              <LogOut className="size-4" /> Salir
-            </button>
+          <div className="flex items-center gap-3">
+            <Avatar nombre={sesion.nombre} className="size-10" />
+            <div className="min-w-0">
+              <p className="truncate font-semibold" title={sesion.email}>{sesion.nombre}</p>
+              <p className="text-[0.8rem] text-humo">{ETIQUETA_ROL[sesion.role]}</p>
+            </div>
           </div>
+          <button type="button" onClick={salir} className="flex h-10 items-center gap-2 rounded-[var(--radius-placa)] px-3 text-[0.88rem] font-medium text-humo transition-colors hover:bg-tinta-2 hover:text-blanco">
+            <LogOut className="size-4" /> Cerrar sesión
+          </button>
         </div>
       </aside>
 
@@ -141,8 +124,9 @@ export function Shell({ children }: { children: ReactNode }) {
         <Link href="/dashboard/" aria-label="Ir al panel">
           <Marca />
         </Link>
-        <span className="rounded-full bg-tinta-2 px-3 py-1 text-[0.78rem] font-semibold text-plata-2">
-          {sesion.perfil === "DUENO" ? "Dueño" : "Vendedor"}
+        <span className="flex max-w-[11rem] items-center gap-2 rounded-full bg-tinta-2 py-1 pr-3 pl-1 text-[0.8rem] font-semibold text-plata-2">
+          <Avatar nombre={sesion.nombre} className="size-7 text-[0.7rem]" />
+          <span className="truncate">{sesion.nombre.split(" ")[0]}</span>
         </span>
       </header>
 
@@ -161,8 +145,8 @@ export function Shell({ children }: { children: ReactNode }) {
         <Link href="/ventas/nueva/" className="flex flex-col items-center pb-2" aria-label="Registrar venta">
           <span
             className={cx(
-              "metal -mt-5 grid size-14 place-items-center rounded-full shadow-[var(--shadow-flota)] ring-4 ring-tinta",
-              vendiendo && "brightness-105",
+              "-mt-5 grid size-14 place-items-center rounded-full bg-blanco text-tinta shadow-[var(--shadow-flota)] ring-4 ring-tinta transition-colors",
+              vendiendo && "bg-plata-1",
             )}
           >
             <Plus className="size-7" />
@@ -176,15 +160,21 @@ export function Shell({ children }: { children: ReactNode }) {
         </button>
       </nav>
 
-      <Hoja abierta={cuenta} alCerrar={() => setCuenta(false)} titulo="Cuenta" descripcion={`Sesión iniciada como ${sesion.usuario}`}>
+      <Hoja abierta={cuenta} alCerrar={() => setCuenta(false)} titulo="Cuenta" descripcion={ETIQUETA_ROL[sesion.role]}>
         <div className="flex flex-col gap-5">
-          <div className="flex flex-col gap-2">
-            <p className="text-[0.82rem] font-semibold">Vista</p>
-            <SelectorPerfil perfil={sesion.perfil} />
-            <p className="text-[0.82rem] text-gris">
-              La vista Vendedor oculta costos, márgenes y la edición de precios e inventario.
-            </p>
+          <div className="flex items-center gap-3 rounded-[var(--radius-placa)] border border-linea bg-blanco p-3.5">
+            <Avatar nombre={sesion.nombre} className="size-12 text-[1rem]" />
+            <div className="min-w-0">
+              <p className="truncate font-semibold">{sesion.nombre}</p>
+              <p className="truncate text-[0.85rem] text-gris">{sesion.email}</p>
+              <p className="truncate text-[0.8rem] text-gris">Usuario: {sesion.username}</p>
+            </div>
           </div>
+          {sesion.role === "VENDEDOR" && (
+            <p className="text-[0.85rem] text-gris">
+              Con el rol Vendedor puedes registrar ventas y consultar stock y clientes. Los costos, márgenes, precios y ajustes de inventario los gestiona un administrador.
+            </p>
+          )}
           <Boton variante="secundario" icono={LogOut} onClick={salir}>
             Cerrar sesión
           </Boton>

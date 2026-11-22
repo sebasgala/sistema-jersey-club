@@ -7,7 +7,7 @@ import { HojaAjuste, HojaNuevaVariante, HojaNuevoProducto } from "@/components/i
 import { BotonEditarPrecio, EditorPrecios, Margen, PlacaCosto } from "@/components/placa-costo";
 import { Aviso, Boton, cx, Esqueleto, EstadoStock, Hoja, Interruptor, Selector, Vacio } from "@/components/ui";
 import { get, mensajeError } from "@/lib/api";
-import { dinero, numero, titulo } from "@/lib/formato";
+import { aCentavos, dinero, numero, titulo } from "@/lib/formato";
 import { useEsDueno } from "@/lib/sesion";
 import { CATEGORIAS, TALLAS, VERSIONES, type PaginaVariantes, type Producto, type Variante } from "@/lib/tipos";
 import { useConsulta } from "@/lib/use-consulta";
@@ -86,6 +86,8 @@ function Inventario() {
     setEditando(null);
     setRecien(v.id);
     actualizar((d) => ({ ...d, items: d.items.map((x) => (x.id === v.id ? { ...x, ...v, producto: x.producto } : x)) }));
+    // Los indicadores (sin costo, valor a costo JRS) dependen de todo el filtro: se vuelven a pedir.
+    recargar();
   }
   function alAjustar(id: string, stock: number) {
     actualizar((d) => ({ ...d, items: d.items.map((x) => (x.id === id ? { ...x, stock_actual: stock } : x)) }));
@@ -127,7 +129,7 @@ function Inventario() {
         <Dato etiqueta="Unidades" valor={datos ? numero(datos.kpis.unidades_stock) : null} nota="En el filtro actual" />
         {dueno ? (
           <>
-            <Dato etiqueta="Valor a costo JRS" valor={datos ? dinero(datos.kpis.valorizacion_costo_jrs) : null} nota={datos ? `A PVP ${dinero(datos.kpis.valorizacion_pvp)}` : ""} />
+            <Dato etiqueta="Valor a costo JRS" valor={datos ? dinero(datos.kpis.valorizacion_costo_jrs) : null} nota={datos ? `A PVP ${dinero(datos.kpis.valorizacion_pvp)}${datos.kpis.skus_sin_costo > 0 ? ` · sin sumar ${numero(datos.kpis.skus_sin_costo)} sin costo` : ""}` : ""} />
             <Dato
               etiqueta="Sin costo"
               valor={datos ? numero(datos.kpis.skus_sin_costo) : null}
@@ -160,7 +162,7 @@ function Inventario() {
             />
           </label>
           <Boton variante="secundario" className="lg:hidden" icono={SlidersHorizontal} onClick={() => setHojaFiltros(true)}>
-            Filtros{activos > 0 && <span className="metal ml-0.5 grid size-6 place-items-center rounded-full text-[0.75rem]">{activos}</span>}
+            Filtros{activos > 0 && <span className="ml-0.5 grid size-6 place-items-center rounded-full bg-tinta text-[0.78rem] text-blanco">{activos}</span>}
           </Boton>
           <div className="flex flex-wrap items-center gap-x-5">
             <Interruptor activo={filtros.solo_disponibles} alCambiar={(v) => cambiar("solo_disponibles", v)} etiqueta="Solo con stock disponible" />
@@ -225,16 +227,17 @@ function Inventario() {
                           <PlacaCosto valor={v.valor_jersey_club} recienCargada={recien === v.id} />
                         </button>
                         <div className="min-w-0 flex-1 text-[0.85rem]">
-                          <p>PVP <b className="cifra text-[1rem]">{dinero(v.pvp_sugerido)}</b></p>
+                          <p>PVP {aCentavos(v.pvp_sugerido) ? <b className="cifra text-[1rem]">{dinero(v.pvp_sugerido)}</b> : <span className="font-semibold text-gris">sin definir</span>}</p>
                           <Margen costo={v.valor_jersey_club} precio={v.pvp_sugerido} className="text-[0.92rem]" />
                         </div>
+                        <BotonEditarPrecio onClick={() => setEditando(editando === v.id ? null : v.id)} etiqueta={`Editar precios de ${v.codigo_legacy ?? "la variante"}`} />
                         <Boton tamano="sm" variante="secundario" icono={ArrowUpDown} onClick={() => setAjustando(v)}>
                           Stock
                         </Boton>
                       </>
                     ) : (
                       <p className="text-[0.9rem]">
-                        PVP sugerido <b className="cifra text-[1.15rem]">{dinero(v.pvp_sugerido)}</b>
+                        PVP sugerido {aCentavos(v.pvp_sugerido) ? <b className="cifra text-[1.15rem]">{dinero(v.pvp_sugerido)}</b> : <span className="font-semibold text-gris">sin definir</span>}
                       </p>
                     )}
                   </div>
@@ -248,7 +251,7 @@ function Inventario() {
             </ul>
 
             {/* PC: tabla */}
-            <div className="hidden overflow-hidden rounded-xl border border-linea bg-blanco lg:block">
+            <div className="hidden overflow-x-auto rounded-xl border border-linea bg-blanco lg:block">
               <table className="w-full border-collapse text-left text-[0.92rem]">
                 <thead className="bg-tinta text-[0.78rem] font-semibold tracking-wide text-humo uppercase">
                   <tr>
@@ -370,7 +373,7 @@ function FilaVariante({
             </button>
           </td>
         )}
-        <td className="cifra px-4 py-3 text-right text-[1.05rem] font-bold">{dinero(v.pvp_sugerido)}</td>
+        <td className="cifra px-4 py-3 text-right text-[1.05rem] font-bold">{aCentavos(v.pvp_sugerido) ? dinero(v.pvp_sugerido) : <span className="font-sans text-[0.8rem] font-semibold text-gris">Sin PVP</span>}</td>
         {dueno && (
           <td className="px-4 py-3 text-right">
             <Margen costo={v.valor_jersey_club} precio={v.pvp_sugerido} />

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Jersey Club — ms-ventas
-  version: 1.1.0
+  version: 1.2.1
   description: |
     Ventas con cierre en un solo clic, detalle con costo congelado y ganancia real.
 
@@ -26,6 +26,14 @@ info:
     Los montos se calculan en centavos enteros; se envían y responden como texto con 2 decimales.
     Las fechas de filtros son fechas locales de Ecuador (`America/Guayaquil`).
 
+    **Vendedor:** el gateway propaga `X-User-Id` y `X-User-Role` (usuario autenticado). `POST /ventas` guarda
+    `vendedor_id = X-User-Id` (el `vendedor_id` del cuerpo solo se usa en llamadas internas sin gateway) y lo
+    incluye en el evento `VentaConfirmada`. Estos servicios confían en esas cabeceras: solo deben ser
+    alcanzables desde el gateway.
+
+    Changelog 1.2.1 (aditivo): `ventas_sin_costo` en `GET /ventas/dashboard`.
+    Changelog 1.2.0 (aditivo): `POST /ventas/{id}/anular`, estado `ANULADA`, campos `anulada_at`, `anulada_por`,
+    `motivo_anulacion`, evento `VentaAnulada`; `vendedor_id` automático desde `X-User-Id`.
     Changelog 1.1.0: `GET /ventas/dashboard` reemplaza a `GET /reportes/ganancias` (aún no publicado);
     códigos de repetición idempotente; `500 VENTA_FALLIDA`.
 servers:
@@ -206,6 +214,68 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /ventas/{id}/anular:
+    post:
+      tags: [ventas]
+      summary: Anular una venta confirmada y devolver su stock
+      description: |
+        Solo ventas `CONFIRMADA`. Pasos:
+        1. Devuelve el stock exacto a ms-inventario (`POST /stock/reversiones`, idempotente por venta;
+           registra `REVERSION_VENTA` en el Kardex al mismo costo del descuento). Si ms-inventario no
+           responde, la venta sigue `CONFIRMADA` y se puede reintentar sin riesgo (`503`).
+        2. En una transacción local pasa la venta a `ANULADA` (guarda `anulada_at`, `anulada_por` =
+           X-User-Id y `motivo_anulacion`) y registra `VentaAnulada` en `outbox_eventos`.
+
+        Es idempotente: anular una venta ya anulada responde `200` con `Idempotent-Replayed: true`, no devuelve
+        stock otra vez ni duplica el evento. Dos anulaciones simultáneas devuelven el stock una sola vez.
+        Las ventas anuladas dejan de contar en `GET /ventas/dashboard`. Por el gateway solo el rol `ADMIN`
+        puede usarla.
+      operationId: anularVenta
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnularVenta' }
+            example: { motivo: El cliente devolvió la camiseta }
+      responses:
+        '200':
+          description: 'Venta anulada (o ya estaba anulada, con la cabecera `Idempotent-Replayed: true`)'
+          headers:
+            Idempotent-Replayed: { schema: { type: boolean, example: true } }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RespuestaBase'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Venta' }
+        '400':
+          description: '`VALIDACION_FALLIDA` (motivo ausente o de menos de 3 caracteres)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`VENTA_NO_ENCONTRADA`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`VENTA_NO_ANULABLE`: la venta está PENDIENTE, RECHAZADA o FALLIDA'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: '`INVENTARIO_NO_DISPONIBLE`: no se pudo devolver el stock; la venta sigue confirmada'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /salud:
     get:
       tags: [salud]
@@ -270,7 +340,7 @@ components:
       enum: [TRANSFERENCIA, EFECTIVO, TARJETA]
     EstadoVenta:
       type: string
-      enum: [PENDIENTE, CONFIRMADA, RECHAZADA, FALLIDA]
+      enum: [PENDIENTE, CONFIRMADA, RECHAZADA, FALLIDA, ANULADA]
     ClienteRespaldo:
       type: object
       additionalProperties: false
@@ -298,7 +368,7 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: Reservado para comisiones en ms-rrhh. Sin validación cruzada en el MVP.
+          description: 'Solo para llamadas internas sin gateway. Por el gateway se ignora: el vendedor es siempre el usuario autenticado (X-User-Id).'
         metodo_pago: { $ref: '#/components/schemas/MetodoPago' }
         observacion: { type: string, maxLength: 500 }
         items:
@@ -350,6 +420,15 @@ components:
         observacion: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        anulada_at: { type: string, format: date-time, nullable: true }
+        anulada_por: { type: string, format: uuid, nullable: true, description: Usuario que anuló (UUID lógico de ms_auth.usuarios) }
+        motivo_anulacion: { type: string, nullable: true }
+    AnularVenta:
+      type: object
+      additionalProperties: false
+      required: [motivo]
+      properties:
+        motivo: { type: string, minLength: 3, maxLength: 300 }
     Venta:
       allOf:
         - $ref: '#/components/schemas/VentaResumen'
@@ -369,6 +448,10 @@ components:
             zona_horaria: { type: string, example: America/Guayaquil }
         ventas_confirmadas: { type: integer, example: 2 }
         unidades_vendidas: { type: integer, example: 2 }
+        ventas_sin_costo:
+          type: integer
+          example: 0
+          description: 'Ventas confirmadas del periodo con al menos un producto cuyo `valor_jersey_club` era 0.00 al vender. Si es mayor que 0, `costo_total_jrs` queda incompleto y `ganancia_neta` / `margen_porcentaje` son parciales (mayores que los reales).'
         total_vendido: { $ref: '#/components/schemas/Dinero' }
         costo_total_jrs: { $ref: '#/components/schemas/Dinero' }
         ganancia_neta: { $ref: '#/components/schemas/Dinero' }

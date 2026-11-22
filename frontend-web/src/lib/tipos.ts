@@ -80,7 +80,7 @@ export interface Cliente {
 }
 
 export type MetodoPago = "TRANSFERENCIA" | "EFECTIVO" | "TARJETA";
-export type EstadoVenta = "PENDIENTE" | "CONFIRMADA" | "RECHAZADA" | "FALLIDA";
+export type EstadoVenta = "PENDIENTE" | "CONFIRMADA" | "RECHAZADA" | "FALLIDA" | "ANULADA";
 
 export interface SnapshotProducto {
   variante_id: string;
@@ -124,6 +124,9 @@ export interface Venta {
   ganancia_total: string;
   observacion: string | null;
   created_at: string;
+  anulada_at: string | null;
+  anulada_por: string | null;
+  motivo_anulacion: string | null;
   detalle?: DetalleVenta[];
 }
 
@@ -131,6 +134,7 @@ export interface Dashboard {
   periodo: { desde: string; hasta: string; zona_horaria: string };
   ventas_confirmadas: number;
   unidades_vendidas: number;
+  ventas_sin_costo: number;
   total_vendido: string;
   costo_total_jrs: string;
   ganancia_neta: string;

@@ -17,6 +17,7 @@ export const ESTADOS_VENTA = [
   'CONFIRMADA',
   'RECHAZADA',
   'FALLIDA',
+  'ANULADA',
 ] as const;
 export type EstadoVenta = (typeof ESTADOS_VENTA)[number];
 
@@ -91,6 +92,16 @@ export class Venta {
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
+
+  @Column({ name: 'anulada_at', type: 'timestamptz', nullable: true })
+  anuladaAt!: Date | null;
+
+  /** UUID lógico de ms_auth.usuarios (sin FK). */
+  @Column({ name: 'anulada_por', type: 'uuid', nullable: true })
+  anuladaPor!: string | null;
+
+  @Column({ name: 'motivo_anulacion', type: 'text', nullable: true })
+  motivoAnulacion!: string | null;
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;

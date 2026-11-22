@@ -3,7 +3,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { aCentavos, deCentavos } from '../common/dinero.util';
 import { ErrorNegocio } from '../common/errores.filter';
-import type { Pagina } from '../common/http.util';
+import type { Pagina, UsuarioContexto } from '../common/http.util';
 import {
   type ClienteRemoto,
   IntegracionesService,
@@ -54,6 +54,9 @@ export interface VentaApi {
   observacion: string | null;
   created_at: Date;
   updated_at: Date;
+  anulada_at: Date | null;
+  anulada_por: string | null;
+  motivo_anulacion: string | null;
   detalle?: DetalleVentaApi[];
 }
 
@@ -72,6 +75,9 @@ export function aVentaApi(v: Venta, conDetalle: boolean): VentaApi {
     observacion: v.observacion,
     created_at: v.createdAt,
     updated_at: v.updatedAt,
+    anulada_at: v.anuladaAt,
+    anulada_por: v.anuladaPor,
+    motivo_anulacion: v.motivoAnulacion,
     ...(conDetalle
       ? {
           detalle: (v.detalle ?? []).map((d) => ({
@@ -114,6 +120,7 @@ export class VentasService {
     clave: string,
     dto: CrearVentaDto,
     correlationId: string,
+    usuario: UsuarioContexto,
   ): Promise<ResultadoVenta> {
     // 1. Idempotencia
     const previa = await this.ventas.findOne({
@@ -138,7 +145,9 @@ export class VentasService {
           idempotencyKey: clave,
           clienteId,
           clienteSnapshot: snapshot,
-          vendedorId: dto.vendedor_id ?? null,
+          // Directriz 4: el vendedor es el usuario autenticado (X-User-Id que propaga el gateway).
+          // El vendedor_id del cuerpo solo se usa en llamadas internas sin gateway.
+          vendedorId: usuario.id ?? dto.vendedor_id ?? null,
           metodoPago: dto.metodo_pago,
           estado: 'PENDIENTE',
           totalVendido: '0.00',
@@ -429,6 +438,101 @@ export class VentasService {
     );
   }
 
+  /**
+   * Anula una venta CONFIRMADA: devuelve el stock exacto al Kardex (REVERSION_VENTA, idempotente
+   * por venta en ms-inventario), marca ANULADA y registra VentaAnulada en el outbox.
+   * Repetirla sobre una venta ya anulada devuelve la misma venta (replay) sin tocar el stock.
+   */
+  async anular(
+    id: string,
+    motivo: string,
+    usuario: UsuarioContexto,
+    correlationId: string,
+  ): Promise<{ replay: boolean; venta: VentaApi }> {
+    const venta = await this.ventas.findOne({
+      where: { id },
+      relations: { detalle: true },
+    });
+    if (!venta) {
+      throw new ErrorNegocio(404, 'VENTA_NO_ENCONTRADA', [
+        `No existe la venta ${id}`,
+      ]);
+    }
+    if (venta.estado === 'ANULADA') {
+      return { replay: true, venta: await this.obtener(id) };
+    }
+    if (venta.estado !== 'CONFIRMADA') {
+      throw new ErrorNegocio(409, 'VENTA_NO_ANULABLE', [
+        `Solo se pueden anular ventas confirmadas; la venta ${venta.numeroComprobante} está ${venta.estado}`,
+      ]);
+    }
+
+    // 1. Devolver el stock. Si falla, la venta sigue CONFIRMADA y se puede reintentar sin riesgo.
+    const r = await this.integraciones.revertirStock(
+      venta.id,
+      `Anulación: ${motivo}`,
+      correlationId,
+    );
+    if (r.tipo === 'no_disponible') {
+      throw new ErrorNegocio(503, 'INVENTARIO_NO_DISPONIBLE', [
+        'No se pudo devolver el stock; la venta sigue confirmada. Intenta de nuevo.',
+        r.motivo,
+      ]);
+    }
+    if (r.tipo === 'error_http') {
+      throw new ErrorNegocio(r.status, r.error_code, r.details);
+    }
+
+    // 2. Marcar ANULADA y dejar el evento, en una sola transacción local.
+    const anulada = await this.dataSource.transaction(async (m) => {
+      const res = await m.update(
+        Venta,
+        { id: venta.id, estado: 'CONFIRMADA' },
+        {
+          estado: 'ANULADA',
+          anuladaAt: new Date(),
+          anuladaPor: usuario.id,
+          motivoAnulacion: motivo,
+        },
+      );
+      if (!res.affected) return false; // otra anulación simultánea ganó la carrera
+      await m.save(
+        m.create(OutboxEvento, {
+          agregadoTipo: 'VENTA',
+          agregadoId: venta.id,
+          tipoEvento: 'VentaAnulada',
+          payload: {
+            version: 1,
+            venta_id: venta.id,
+            numero_comprobante: venta.numeroComprobante,
+            cliente_id: venta.clienteId,
+            vendedor_id: venta.vendedorId,
+            anulada_por: usuario.id,
+            motivo,
+            total_vendido: venta.totalVendido,
+            costo_total_jrs: venta.costoTotalJrs,
+            ganancia_total: venta.gananciaTotal,
+            items: (venta.detalle ?? []).map((d) => ({
+              variante_id: d.varianteId,
+              cantidad: d.cantidad,
+            })),
+            anulada_en: new Date().toISOString(),
+          },
+        }),
+      );
+      return true;
+    });
+
+    if (!anulada) {
+      const actual = await this.obtener(id);
+      if (actual.estado === 'ANULADA') return { replay: true, venta: actual };
+      throw new ErrorNegocio(409, 'VENTA_NO_ANULABLE', [
+        `La venta cambió de estado mientras se anulaba (${actual.estado})`,
+      ]);
+    }
+    return { replay: false, venta: await this.obtener(id) };
+  }
+
   // ---------------------------------------------------------------- consultas
   async obtener(id: string): Promise<VentaApi> {
     const venta = await this.ventas.findOne({
@@ -500,6 +604,14 @@ export class VentasService {
          FROM detalle_ventas d JOIN ventas v ON v.id = d.venta_id WHERE ${filtro}`,
       [desde, hasta],
     );
+    // Ventas con al menos una línea cuyo costo era 0.00 al vender (costo aún no cargado):
+    // su ganancia es mayor que la real, así que el dashboard debe advertirlo.
+    const [sinCosto] = await this.dataSource.query<{ ventas: string }[]>(
+      `SELECT COUNT(DISTINCT d.venta_id) AS ventas
+         FROM detalle_ventas d JOIN ventas v ON v.id = d.venta_id
+        WHERE ${filtro} AND d.valor_jersey_club_unitario = 0`,
+      [desde, hasta],
+    );
     const porMetodo = await this.dataSource.query<Record<string, string>[]>(
       `SELECT m.metodo_pago, COUNT(v.id) AS ventas,
               COALESCE(SUM(v.total_vendido), 0)::numeric(14,2)::text AS total_vendido,
@@ -529,6 +641,7 @@ export class VentasService {
       periodo: { desde, hasta, zona_horaria: ZONA },
       ventas_confirmadas: Number(totales.ventas),
       unidades_vendidas: Number(unidades.unidades),
+      ventas_sin_costo: Number(sinCosto.ventas),
       total_vendido: totales.total_vendido,
       costo_total_jrs: totales.costo_total_jrs,
       ganancia_neta: totales.ganancia_neta,

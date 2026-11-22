@@ -3,28 +3,45 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * Sesión en localStorage. El perfil (Dueño / Vendedor) ajusta la interfaz:
- * es una vista, no un control de acceso — el gateway tiene hoy un solo usuario.
+ * Sesión en localStorage. El rol y los datos del usuario vienen del gateway al iniciar sesión
+ * (usuarios reales de ms_auth). La interfaz oculta lo que el rol no puede usar, pero la
+ * restricción real la aplica el gateway: un VENDEDOR no recibe costos ni puede administrar.
  */
-export type Perfil = "DUENO" | "VENDEDOR";
+export type Rol = "ADMIN" | "VENDEDOR";
 
 export interface Sesion {
   token: string;
   expiraEn: number; // epoch ms
-  usuario: string;
-  perfil: Perfil;
+  id: string;
+  username: string;
+  email: string;
+  nombre: string;
+  role: Rol;
 }
 
 const CLAVE = "jc.sesion";
 const oyentes = new Set<() => void>();
 let cache: Sesion | null | undefined;
 
+function esSesion(x: unknown): x is Sesion {
+  const s = x as Partial<Sesion> | null;
+  return (
+    !!s &&
+    typeof s.token === "string" &&
+    typeof s.expiraEn === "number" &&
+    typeof s.nombre === "string" &&
+    typeof s.username === "string" &&
+    (s.role === "ADMIN" || s.role === "VENDEDOR")
+  );
+}
+
 function leer(): Sesion | null {
   if (cache !== undefined) return cache;
   try {
     const crudo = localStorage.getItem(CLAVE);
-    const s = crudo ? (JSON.parse(crudo) as Sesion) : null;
-    cache = s && s.expiraEn > Date.now() ? s : null;
+    const s: unknown = crudo ? JSON.parse(crudo) : null;
+    // Una sesión guardada por la versión anterior (sin rol real) se descarta.
+    cache = esSesion(s) && s.expiraEn > Date.now() ? s : null;
   } catch {
     cache = null;
   }
@@ -53,11 +70,6 @@ export function guardarSesion(s: Sesion): void {
     /* modo privado: la sesión vive solo en memoria */
   }
   emitir();
-}
-
-export function cambiarPerfil(perfil: Perfil): void {
-  const s = obtenerSesion();
-  if (s) guardarSesion({ ...s, perfil });
 }
 
 export function cerrarSesion(): void {
@@ -89,6 +101,17 @@ export function useSesion(): Sesion | null {
   return useSyncExternalStore(suscribir, obtenerSesion, () => null);
 }
 
+/** "Dueño" en la interfaz = rol ADMIN: ve costos, márgenes y administra inventario y precios. */
 export function useEsDueno(): boolean {
-  return useSesion()?.perfil === "DUENO";
+  return useSesion()?.role === "ADMIN";
+}
+
+export const ETIQUETA_ROL: Record<Rol, string> = {
+  ADMIN: "Administrador",
+  VENDEDOR: "Vendedor",
+};
+
+export function iniciales(nombre: string): string {
+  const partes = nombre.trim().split(/\s+/).filter(Boolean);
+  return ((partes[0]?.[0] ?? "") + (partes.length > 1 ? (partes[partes.length - 1][0] ?? "") : "")).toUpperCase();
 }

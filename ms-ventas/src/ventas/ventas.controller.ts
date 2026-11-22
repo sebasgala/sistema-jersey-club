@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Headers,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Post,
@@ -11,9 +12,19 @@ import {
 } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CorrelationId, exigirIdempotencyKey } from '../common/http.util';
+import {
+  CorrelationId,
+  exigirIdempotencyKey,
+  UsuarioActual,
+  type UsuarioContexto,
+} from '../common/http.util';
 import { Respuesta } from '../common/respuesta.interceptor';
-import { BuscarVentasDto, CrearVentaDto, DashboardDto } from './dto/venta.dto';
+import {
+  AnularVentaDto,
+  BuscarVentasDto,
+  CrearVentaDto,
+  DashboardDto,
+} from './dto/venta.dto';
 import { VentasService } from './ventas.service';
 
 @ApiTags('ventas')
@@ -36,6 +47,7 @@ export class VentasController {
     @Headers('idempotency-key') cabecera: string | undefined,
     @Body() dto: CrearVentaDto,
     @CorrelationId() correlationId: string,
+    @UsuarioActual() usuario: UsuarioContexto,
     @Res({ passthrough: true }) res: Response,
   ) {
     const clave = exigirIdempotencyKey(cabecera, 100);
@@ -43,6 +55,7 @@ export class VentasController {
       clave,
       dto,
       correlationId,
+      usuario,
     );
     res.location(`/api/v1/ventas/${venta.id}`);
     if (replay) {
@@ -56,6 +69,33 @@ export class VentasController {
         : 'Venta confirmada',
       venta,
     );
+  }
+
+  @Post(':id/anular')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Anular una venta confirmada y devolver su stock',
+    description:
+      'Solo ventas CONFIRMADA. Devuelve el stock exacto al Kardex (REVERSION_VENTA), pasa la venta a ANULADA y registra VentaAnulada. Repetir sobre una venta ya anulada responde 200 sin tocar el stock.',
+  })
+  async anular(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: AnularVentaDto,
+    @CorrelationId() correlationId: string,
+    @UsuarioActual() usuario: UsuarioContexto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { replay, venta } = await this.ventas.anular(
+      id,
+      dto.motivo,
+      usuario,
+      correlationId,
+    );
+    if (replay) {
+      res.setHeader('Idempotent-Replayed', 'true');
+      return new Respuesta('Venta ya estaba anulada', venta);
+    }
+    return new Respuesta('Venta anulada y stock devuelto', venta);
   }
 
   @Get('dashboard')

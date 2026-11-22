@@ -16,7 +16,7 @@ Documentos de contexto (leer antes de diseñar o cambiar contratos):
 ### Directriz 1 — Arquitectura Modular
 
 - El sistema se compone de bloques independientes: hoy `ms-inventario`, `ms-ventas` y `ms-clientes`; preparados para `ms-compras` y `ms-rrhh`.
-- Cada servicio es dueño exclusivo de su esquema PostgreSQL: `ms_inventario`, `ms_ventas`, `ms_clientes` (luego `ms_compras`, `ms_rrhh`).
+- Cada servicio es dueño exclusivo de su esquema PostgreSQL: `ms_inventario`, `ms_ventas`, `ms_clientes` (luego `ms_compras`, `ms_rrhh`). El gateway es dueño de `ms_auth` (usuarios y roles): ningún microservicio lo lee; `vendedor_id` y `anulada_por` son UUID lógicos hacia `ms_auth.usuarios.id`, sin FK.
 - **Prohibido:** `FOREIGN KEY` entre esquemas, `JOIN` SQL entre esquemas y que un servicio lea o escriba tablas de otro.
 - Las referencias entre servicios son **`UUID` lógicos sin constraint** más **snapshots `JSONB`** con los datos congelados en el momento de la operación (cliente, variante, precio, costo).
 - La comunicación entre servicios es solo por HTTP contra los contratos de `contracts/`. Si un servicio cae, los demás siguen operando con sus snapshots.
@@ -46,9 +46,9 @@ Documentos de contexto (leer antes de diseñar o cambiar contratos):
   - `PASAPORTE`: alfanumérico, 5 a 20 caracteres.
   - `CONSUMIDOR_FINAL`: `9999999999999`; registro único precargado con id fijo `00000000-0000-4000-8000-000000000001`; teléfono, provincia y ciudad opcionales.
 - El cierre de venta es **un solo clic** orquestado por `ms-ventas`: descuenta stock en `ms-inventario`, registra el método de pago (`TRANSFERENCIA`, `EFECTIVO`, `TARJETA`) y confirma la venta.
-- Cada venta guarda `vendedor_id` (`UUID` nullable, sin FK) para futuras comisiones en RRHH.
+- Cada venta guarda `vendedor_id` (`UUID` nullable, sin FK) para futuras comisiones en RRHH. Lo asigna el servidor: es el usuario autenticado (`X-User-Id` que pone el gateway); el valor que envíe el cliente se ignora.
 - `ms-ventas` escribe en `outbox_eventos` (evento `VentaConfirmada`) en la misma transacción que confirma la venta. En el MVP no hay relay.
-- Estados de venta: `PENDIENTE` → `CONFIRMADA` | `RECHAZADA` | `FALLIDA` (con compensación vía `POST /api/v1/stock/reversiones`).
+- Estados de venta: `PENDIENTE` → `CONFIRMADA` | `RECHAZADA` | `FALLIDA` (con compensación vía `POST /api/v1/stock/reversiones`). Una venta `CONFIRMADA` puede pasar a `ANULADA` con `POST /api/v1/ventas/:id/anular` (devuelve el stock exacto al Kardex como `REVERSION_VENTA`, guarda motivo y usuario, y registra `VentaAnulada` en el outbox); es idempotente y las anuladas no cuentan en el dashboard.
 
 ---
 
@@ -155,9 +155,12 @@ Error:
 - **Bloqueos:** toda operación de stock bloquea las variantes con `SELECT ... FOR UPDATE` **en orden de id** para evitar interbloqueos.
 - **Kardex valorizado:** cada movimiento guarda `costo_unitario`; una repetición idempotente devuelve el costo original.
 - **Dinero:** se calcula en centavos enteros (`common/dinero.util.ts`), nunca con `number` de punto flotante.
-- **Gateway:** único punto público (JWT obligatorio salvo `/auth/login` y `/salud`). Los microservicios no validan JWT: en producción no deben exponerse fuera de la red interna.
+- **Gateway:** único punto público (JWT obligatorio salvo `/auth/login` y `/salud`). Los microservicios no validan JWT ni roles: confían en `X-User-Id` y `X-User-Role` (el gateway descarta las que envíe el cliente), así que en producción no deben exponerse fuera de la red interna.
+- **Usuarios y roles:** viven en `ms_auth.usuarios` (bcrypt, rol `ADMIN` | `VENDEDOR`). **No hay usuarios por defecto**: se crean con `npm run crear-usuario` en `gateway/`. El login busca por `username` o `email` sin distinguir mayúsculas y bloquea tras 5 intentos fallidos por IP. `gateway/.env` no contiene credenciales de administrador.
+- **Permisos (los aplica el gateway, no solo la pantalla):** `VENDEDOR` puede leer, registrar ventas y gestionar clientes; recibe `403 ROL_NO_AUTORIZADO` al crear/editar productos o variantes, cambiar precios, ajustar stock o anular ventas, y el gateway elimina de todas sus respuestas los campos de costo y ganancia. Todo cambio de permisos se refleja en `contracts/gateway.openapi.yaml` y en la prueba E2E.
+- **Contenedores:** cada servicio tiene su `Dockerfile` multi-etapa y `docker-compose.yml` levanta todo con `--profile stack` (solo el gateway publica puerto).
 - **Cambios de esquema:** solo aditivos e idempotentes en `01_schema_mvp_jersey_club.sql` (`ADD COLUMN IF NOT EXISTS`), reaplicables sobre una base existente.
-- **Antes de dar por terminada una funcionalidad** se ejecuta `pruebas-e2e/flujo-venta.e2e.mjs`; debe terminar con todas las verificaciones OK y la huella de inventario intacta.
+- **Antes de dar por terminada una funcionalidad** se ejecuta `pruebas-e2e/flujo-venta.e2e.mjs` (no necesita credenciales: crea y borra sus propios usuarios en `ms_auth`); debe terminar con todas las verificaciones OK y la huella de la base intacta.
 
 ## 6. Versiones de Dependencias
 

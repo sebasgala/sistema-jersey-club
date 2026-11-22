@@ -15,7 +15,10 @@ export const Publica = () => SetMetadata(ES_PUBLICA, true);
 
 export interface UsuarioToken {
   sub: string;
-  rol: string;
+  username: string;
+  email: string;
+  nombre: string;
+  role: 'ADMIN' | 'VENDEDOR';
 }
 
 export interface RequestAutenticada extends Request {

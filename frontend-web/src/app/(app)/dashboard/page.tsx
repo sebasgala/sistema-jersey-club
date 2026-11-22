@@ -1,12 +1,12 @@
 "use client";
 
-import { ArrowRight, PackageOpen, Plus, RefreshCw, Trophy } from "lucide-react";
+import { ArrowRight, PackageOpen, PencilLine, Plus, RefreshCw, Trophy } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { EditorPrecios, PlacaCosto } from "@/components/placa-costo";
 import { Aviso, Boton, cx, Esqueleto, EstadoStock, Vacio } from "@/components/ui";
 import { get, mensajeError } from "@/lib/api";
-import { aCentavos, dinero, fechaDia, hoyEcuador, inicioMesEcuador, nombreProducto, numero, porcentaje, rasgos, titulo } from "@/lib/formato";
+import { aCentavos, dinero, fechaDia, hoyEcuador, inicioMesEcuador, nombreProducto, numero, plural, porcentaje, rasgos, titulo } from "@/lib/formato";
 import { useEsDueno } from "@/lib/sesion";
 import type { Dashboard, PaginaVariantes, Variante } from "@/lib/tipos";
 import { useConsulta } from "@/lib/use-consulta";
@@ -100,27 +100,27 @@ export default function PaginaDashboard() {
           {dueno ? (
             <Indicador
               principal
-              etiqueta="Ganancia neta"
+              etiqueta={d && d.ventas_sin_costo > 0 ? "Ganancia neta · parcial" : "Ganancia neta"}
               valor={d ? dinero(d.ganancia_neta) : null}
-              nota={d ? `${numero(d.ventas_confirmadas)} ${d.ventas_confirmadas === 1 ? "venta" : "ventas"} confirmadas` : null}
+              nota={d ? plural(d.ventas_confirmadas, "venta confirmada", "ventas confirmadas") + (d.ventas_sin_costo > 0 ? ` · ${d.ventas_sin_costo} sin costo` : "") : null}
               tono={d && aCentavos(d.ganancia_neta) < 0 ? "text-[#ff9aa3]" : undefined}
             />
           ) : (
-            <Indicador principal etiqueta="Ventas del periodo" valor={d ? dinero(d.total_vendido) : null} nota={d ? `${numero(d.ventas_confirmadas)} ventas · ${numero(d.unidades_vendidas)} unidades` : null} />
+            <Indicador principal etiqueta="Ventas del periodo" valor={d ? dinero(d.total_vendido) : null} nota={d ? `${plural(d.ventas_confirmadas, "venta")} · ${plural(d.unidades_vendidas, "unidad", "unidades")}` : null} />
           )}
           {dueno && <Indicador etiqueta="Ventas totales" valor={d ? dinero(d.total_vendido) : null} nota={d ? `Ticket promedio ${dinero(d.ticket_promedio)}` : null} />}
-          {dueno && <Indicador etiqueta="Costo Jersey Club" valor={d ? dinero(d.costo_total_jrs) : null} nota="Costo congelado en cada venta" />}
-          {dueno && <Indicador etiqueta="Margen promedio" valor={d ? porcentaje(d.margen_porcentaje) : null} nota="Ganancia sobre lo vendido" />}
+          {dueno && <Indicador etiqueta="Costo Jersey Club" valor={d ? (aCentavos(d.costo_total_jrs) === 0 && aCentavos(d.total_vendido) > 0 ? "Sin cargar" : dinero(d.costo_total_jrs)) : null} nota={d && d.ventas_sin_costo > 0 ? "Incompleto: faltan costos" : "Costo congelado en cada venta"} />}
+          {dueno && <Indicador etiqueta={d && d.ventas_sin_costo > 0 ? "Margen · parcial" : "Margen promedio"} valor={d ? (aCentavos(d.costo_total_jrs) === 0 && aCentavos(d.total_vendido) > 0 ? "—" : porcentaje(d.margen_porcentaje)) : null} nota={d && d.ventas_sin_costo > 0 ? "Mayor que el real" : "Ganancia sobre lo vendido"} />}
           {!dueno && <Indicador etiqueta="Ticket promedio" valor={d ? dinero(d.ticket_promedio) : null} nota="Por venta confirmada" />}
           <Indicador etiqueta="Unidades en stock" valor={k ? numero(k.unidades_stock) : null} nota={k ? `${numero(k.skus_con_stock)} variantes disponibles` : null} enlace="/inventario/?solo_disponibles=true" />
         </div>
       </section>
 
-      <Link href="/ventas/nueva/" className="metal flex h-14 items-center justify-center gap-2 rounded-[var(--radius-placa)] text-[1.05rem] font-bold sm:hidden">
+      <Link href="/ventas/nueva/" className="flex h-14 items-center justify-center gap-2 rounded-[var(--radius-placa)] bg-tinta text-[1.05rem] font-bold text-blanco transition-colors hover:bg-tinta-2 sm:hidden">
         <Plus className="size-5" /> Registrar venta rápida
       </Link>
 
-      <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] lg:gap-8">
+      <div className="order-3 grid grid-cols-[minmax(0,1fr)] gap-6 lg:order-2 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] lg:gap-8">
         <section className="rounded-xl border border-linea bg-blanco p-5 lg:p-6">
           <h2 className="cifra text-[1.35rem] font-bold">Ingresos por método de pago</h2>
           {!d ? (
@@ -179,7 +179,11 @@ export default function PaginaDashboard() {
         </section>
       </div>
 
-      {dueno && <CostosPendientes kpis={k ?? null} pendientes={pendientes} />}
+      {dueno && (
+        <div className="order-2 lg:order-3">
+          <CostosPendientes kpis={k ?? null} pendientes={pendientes} />
+        </div>
+      )}
     </div>
   );
 }
@@ -247,8 +251,8 @@ function MetodosPago({ d, dueno }: { d: Dashboard; dueno: boolean }) {
               <span className="text-right">
                 <span className="cifra block text-[1.2rem] font-bold">{dinero(m.total_vendido)}</span>
                 <span className="text-[0.78rem] text-gris">
-                  {porcentaje(pct)}
-                  {dueno && ` · ganancia ${dinero(m.ganancia_total)}`}
+                  {porcentaje(pct)} del total
+                  {dueno && ` · ganancia${d.ventas_sin_costo > 0 ? " parcial" : ""} ${dinero(m.ganancia_total)}`}
                 </span>
               </span>
             </li>
@@ -308,7 +312,7 @@ function CostosPendientes({
         <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-linea-2" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100} aria-label="Costos cargados">
           <div className="metal-barra h-full rounded-full transition-[width] duration-700" style={{ width: `${pct}%` }} />
         </div>
-        <p className="mt-2 text-[0.82rem] font-medium text-error">{kpis ? `${numero(kpis.skus_sin_costo)} variantes con costo $0,00` : ""}</p>
+        <p className="mt-2 text-[0.82rem] font-medium text-error">{kpis ? `${plural(kpis.skus_sin_costo, "variante")} sin costo cargado` : ""}</p>
       </div>
       <ul className="mt-3">
         {pendientes.error ? (
@@ -332,10 +336,11 @@ function CostosPendientes({
                 </div>
                 <span className="flex-1 sm:hidden" />
                 <EstadoStock stock={v.stock_actual} compacto />
+                <PlacaCosto valor={v.valor_jersey_club} recienCargada={recien === v.id} />
                 {editando !== v.id && (
-                  <button type="button" onClick={() => setEditando(v.id)} className="rounded-[4px] transition-transform hover:scale-[1.03]" aria-label={`Cargar costo de ${v.codigo_legacy ?? "la variante"}`}>
-                    <PlacaCosto valor={v.valor_jersey_club} recienCargada={recien === v.id} />
-                  </button>
+                  <Boton tamano="sm" variante="secundario" icono={PencilLine} onClick={() => setEditando(v.id)} aria-label={`Cargar costo de ${v.codigo_legacy ?? "la variante"}`}>
+                    Cargar costo
+                  </Boton>
                 )}
               </div>
               {editando === v.id && (

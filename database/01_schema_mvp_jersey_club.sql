@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS ms_ventas.ventas (
   cliente_snapshot    JSONB         NOT NULL,
   vendedor_id         UUID,                            -- lógico → futuro ms_rrhh (sin FK)
   metodo_pago         VARCHAR(20)   NOT NULL CHECK (metodo_pago IN ('TRANSFERENCIA', 'EFECTIVO', 'TARJETA')),
-  estado              VARCHAR(20)   NOT NULL DEFAULT 'CONFIRMADA' CHECK (estado IN ('PENDIENTE', 'CONFIRMADA', 'RECHAZADA', 'FALLIDA')),
+  estado              VARCHAR(20)   NOT NULL DEFAULT 'CONFIRMADA',   -- regla en ck_ventas_estado (más abajo)
   total_vendido       NUMERIC(10,2) NOT NULL CHECK (total_vendido >= 0),
   costo_total_jrs     NUMERIC(10,2) NOT NULL CHECK (costo_total_jrs >= 0),
   ganancia_total      NUMERIC(10,2) NOT NULL,          -- puede ser negativa (venta bajo costo)
@@ -196,6 +196,16 @@ CREATE TABLE IF NOT EXISTS ms_ventas.ventas (
 );
 
 CREATE INDEX IF NOT EXISTS ix_ventas_created_at ON ms_ventas.ventas (created_at);
+-- v1.2 (2026-11-21): anulación de ventas. La regla de estados se recrea en cada ejecución
+-- (también reemplaza la CHECK en línea ventas_estado_check de bases ya creadas).
+ALTER TABLE ms_ventas.ventas DROP CONSTRAINT IF EXISTS ventas_estado_check;
+ALTER TABLE ms_ventas.ventas DROP CONSTRAINT IF EXISTS ck_ventas_estado;
+ALTER TABLE ms_ventas.ventas ADD CONSTRAINT ck_ventas_estado
+  CHECK (estado IN ('PENDIENTE', 'CONFIRMADA', 'RECHAZADA', 'FALLIDA', 'ANULADA'));
+ALTER TABLE ms_ventas.ventas ADD COLUMN IF NOT EXISTS anulada_at TIMESTAMPTZ;
+ALTER TABLE ms_ventas.ventas ADD COLUMN IF NOT EXISTS anulada_por UUID;          -- lógico → ms_auth.usuarios (sin FK)
+ALTER TABLE ms_ventas.ventas ADD COLUMN IF NOT EXISTS motivo_anulacion TEXT;
+
 CREATE INDEX IF NOT EXISTS ix_ventas_estado     ON ms_ventas.ventas (estado);
 CREATE INDEX IF NOT EXISTS ix_ventas_cliente    ON ms_ventas.ventas (cliente_id);
 CREATE INDEX IF NOT EXISTS ix_ventas_vendedor   ON ms_ventas.ventas (vendedor_id) WHERE vendedor_id IS NOT NULL;
@@ -232,3 +242,23 @@ CREATE TABLE IF NOT EXISTS ms_ventas.outbox_eventos (
 );
 
 CREATE INDEX IF NOT EXISTS ix_outbox_pendientes ON ms_ventas.outbox_eventos (created_at) WHERE procesado = FALSE;
+
+-- =============================================================================
+-- ESQUEMA ms_auth (v1.2): usuarios y roles reales. Lo usa únicamente el gateway.
+-- NO se crean usuarios por defecto: se crean con `npm run crear-usuario` en gateway/.
+-- ms_ventas.ventas.vendedor_id referencia a ms_auth.usuarios.id como UUID lógico (sin FK).
+-- =============================================================================
+CREATE SCHEMA IF NOT EXISTS ms_auth;
+
+CREATE TABLE IF NOT EXISTS ms_auth.usuarios (
+  id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  username         VARCHAR(50)  UNIQUE NOT NULL,
+  email            VARCHAR(150) UNIQUE NOT NULL,
+  nombre_completo  VARCHAR(120) NOT NULL,
+  password_hash    TEXT         NOT NULL,                 -- bcrypt
+  role             VARCHAR(20)  NOT NULL CHECK (role IN ('ADMIN', 'VENDEDOR')),
+  activo           BOOLEAN      NOT NULL DEFAULT TRUE,
+  created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- El inicio de sesión busca sin distinguir mayúsculas: se guardan siempre en minúsculas.
+  CONSTRAINT ck_usuarios_minusculas CHECK (username = LOWER(username) AND email = LOWER(email))
+);

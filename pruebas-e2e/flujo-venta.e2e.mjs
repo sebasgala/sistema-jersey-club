@@ -3,15 +3,18 @@
  * Prueba end-to-end del flujo comercial de Jersey Club, siempre a través del gateway.
  *
  * 1. Levanta ms-inventario, ms-ventas, ms-clientes y gateway (node dist/main).
- * 2. Ejecuta: login → variantes/KPIs → clientes → venta → idempotencia → 409 →
- *    concurrencia → compensación → dashboard → ajustes/precios → degradación.
- * 3. Limpia todo lo creado y verifica que el inventario del Excel quedó idéntico.
+ * 2. Crea usuarios temporales en ms_auth.usuarios (con el script crear-usuario del gateway) y
+ *    ejecuta: login por usuario y correo → roles ADMIN/VENDEDOR → variantes/KPIs → clientes →
+ *    venta → idempotencia → 409 → concurrencia → compensación → dashboard → degradación →
+ *    vendedor_id automático → anulación de ventas → bloqueo de login.
+ * 3. Borra todo lo creado (incluidos los usuarios) y verifica que la base quedó idéntica.
  * 4. Detiene los procesos.
  *
- * Requisitos: contenedor pg-jersey-club arriba, servicios compilados (npm run build)
- * y la contraseña del administrador en la variable E2E_ADMIN_PASSWORD.
+ * Requisitos: contenedor pg-jersey-club arriba, esquema aplicado (incluye ms_auth),
+ * servicios compilados (npm run build) y puertos 3010-3013 libres. No necesita credenciales:
+ * crea y borra sus propios usuarios de prueba.
  *
- *   E2E_ADMIN_PASSWORD='...' node pruebas-e2e/flujo-venta.e2e.mjs
+ *   node pruebas-e2e/flujo-venta.e2e.mjs
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -21,8 +24,6 @@ import { fileURLToPath } from 'node:url';
 
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..');
 const GATEWAY = process.env.E2E_GATEWAY_URL ?? 'http://localhost:3010/api/v1';
-const USUARIO = process.env.E2E_ADMIN_USUARIO ?? 'admin';
-const CLAVE = process.env.E2E_ADMIN_PASSWORD;
 const SERVICIOS = [
   { nombre: 'ms-inventario', puerto: 3011 },
   { nombre: 'ms-clientes', puerto: 3013 },
@@ -30,11 +31,6 @@ const SERVICIOS = [
   { nombre: 'gateway', puerto: 3010 },
 ];
 const CEDULA_PRUEBA = '1710034065'; // cédula sintética válida (módulo 10)
-
-if (!CLAVE) {
-  console.error('Defina E2E_ADMIN_PASSWORD con la contraseña del administrador del gateway');
-  process.exit(2);
-}
 
 // ----------------------------------------------------------------------------- utilidades
 const env = Object.fromEntries(
@@ -62,12 +58,14 @@ function verificar(condicion, descripcion, detalle = '') {
 const seccion = (t) => console.log(`\n▶ ${t}`);
 
 let token = '';
-async function api(metodo, ruta, { cuerpo, cabeceras = {}, sinToken = false } = {}) {
+let tokenVendedor = '';
+async function api(metodo, ruta, { cuerpo, cabeceras = {}, sinToken = false, token: tokenPropio } = {}) {
+  const t = tokenPropio ?? token;
   const res = await fetch(`${GATEWAY}${ruta}`, {
     method: metodo,
     headers: {
       ...(cuerpo !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...(token && !sinToken ? { Authorization: `Bearer ${token}` } : {}),
+      ...(t && !sinToken ? { Authorization: `Bearer ${t}` } : {}),
       ...cabeceras,
     },
     body: cuerpo !== undefined ? JSON.stringify(cuerpo) : undefined,
@@ -113,11 +111,30 @@ const huellaInventario = () =>
          || '|' || (SELECT COUNT(*) FROM ms_inventario.productos)
          || '|' || (SELECT COUNT(*) FROM ms_clientes.clientes)
          || '|' || (SELECT COUNT(*) FROM ms_ventas.ventas)
+         || '|' || (SELECT COUNT(*) FROM ms_ventas.outbox_eventos)
+         || '|' || (SELECT COUNT(*) FROM ms_auth.usuarios)
        FROM ms_inventario.variantes;`);
 const stockDe = (id) => Number(sql(`SELECT stock_actual FROM ms_inventario.variantes WHERE id = '${id}';`));
 
 // ----------------------------------------------------------------------------- prueba
-const creado = { ventas: new Set(), clientes: new Set(), productos: new Set(), clavesAjuste: [] };
+const creado = { ventas: new Set(), clientes: new Set(), productos: new Set(), clavesAjuste: [], usuarios: [] };
+const quien = {};
+
+/** Crea un usuario temporal con el mismo script que usará el administrador real. */
+function crearUsuarioPrueba(rol) {
+  const sufijo = randomUUID().slice(0, 8);
+  const u = {
+    rol,
+    username: `e2e.${rol.toLowerCase()}.${sufijo}`,
+    email: `e2e.${rol.toLowerCase()}.${sufijo}@ejemplo.test`,
+    nombre: `Usuario Prueba ${rol} ${sufijo}`,
+    clave: `Cl4ve-${randomUUID()}`,
+  };
+  execFileSync(process.execPath, [join(RAIZ, 'gateway', 'scripts', 'crear-usuario.mjs'), u.username, u.email, u.nombre, rol, u.clave], { encoding: 'utf8' });
+  u.id = sql(`SELECT id FROM ms_auth.usuarios WHERE username = '${u.username}';`);
+  creado.usuarios.push(u.id);
+  return u;
+}
 
 async function main() {
   for (const s of SERVICIOS) {
@@ -151,15 +168,41 @@ async function main() {
 }
 
 async function flujo() {
-  // --------------------------------------------------------------- autenticación
-  seccion('Autenticación JWT en el gateway');
+  // --------------------------------------------------------------- usuarios reales y autenticación
+  seccion('Autenticación JWT con usuarios reales (ms_auth.usuarios)');
+  quien.admin = crearUsuarioPrueba('ADMIN');
+  quien.vendedor = crearUsuarioPrueba('VENDEDOR');
+  quien.inactivo = crearUsuarioPrueba('VENDEDOR');
+  sql(`UPDATE ms_auth.usuarios SET activo = FALSE WHERE id = '${quien.inactivo.id}';`);
+  verificar(
+    Number(sql(`SELECT COUNT(*) FROM ms_auth.usuarios WHERE id IN (${lista(creado.usuarios)});`)) === 3,
+    'Tres usuarios temporales creados con el script crear-usuario (admin, vendedor e inactivo)',
+  );
   const sinToken = await api('GET', '/variantes', { sinToken: true });
   verificar(sinToken.status === 401 && sinToken.json.error_code === 'NO_AUTENTICADO', 'Sin token → 401 NO_AUTENTICADO', resumen(sinToken));
-  const malo = await api('POST', '/auth/login', { cuerpo: { usuario: USUARIO, contrasena: 'incorrecta' }, sinToken: true });
+  const malo = await api('POST', '/auth/login', { cuerpo: { usuario: quien.admin.username, contrasena: 'incorrecta' }, sinToken: true });
   verificar(malo.status === 401 && malo.json.error_code === 'CREDENCIALES_INVALIDAS', 'Contraseña incorrecta → 401', resumen(malo));
-  const login = await api('POST', '/auth/login', { cuerpo: { usuario: USUARIO, contrasena: CLAVE }, sinToken: true });
-  verificar(login.status === 200 && login.json.data?.access_token, 'Login correcto → 200 con access_token', resumen(login));
-  token = login.json.data?.access_token ?? '';
+  const fantasma = await api('POST', '/auth/login', { cuerpo: { usuario: 'no.existe.e2e', contrasena: 'cualquiera-123' }, sinToken: true });
+  verificar(
+    fantasma.status === 401 && fantasma.json.error_code === 'CREDENCIALES_INVALIDAS' && JSON.stringify(fantasma.json.details) === JSON.stringify(malo.json.details),
+    'Usuario inexistente → el mismo 401 (no revela si el usuario existe)',
+    resumen(fantasma),
+  );
+  const loginInactivo = await api('POST', '/auth/login', { cuerpo: { usuario: quien.inactivo.username, contrasena: quien.inactivo.clave }, sinToken: true });
+  verificar(loginInactivo.status === 401 && loginInactivo.json.error_code === 'CREDENCIALES_INVALIDAS', 'Usuario desactivado con la clave correcta → 401', resumen(loginInactivo));
+  const hashes = sql(`SELECT string_agg(left(password_hash, 7), ',') FROM ms_auth.usuarios WHERE id IN (${lista(creado.usuarios)});`);
+  verificar(/^(\$2b\$12\$)(,\$2b\$12\$)*$/.test(hashes), `Contraseñas guardadas con bcrypt costo 12 (${hashes})`);
+  const loginAdmin = await api('POST', '/auth/login', { cuerpo: { usuario: quien.admin.username, contrasena: quien.admin.clave }, sinToken: true });
+  token = loginAdmin.json.data?.access_token ?? '';
+  const claims = token ? JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) : {};
+  verificar(
+    loginAdmin.status === 200 && claims.sub === quien.admin.id && claims.username === quien.admin.username && claims.email === quien.admin.email && claims.nombre === quien.admin.nombre && claims.role === 'ADMIN',
+    'Login por usuario → 200; el JWT lleva sub, username, email, nombre y role',
+    JSON.stringify(claims),
+  );
+  const loginCorreo = await api('POST', '/auth/login', { cuerpo: { usuario: quien.vendedor.email.toUpperCase(), contrasena: quien.vendedor.clave }, sinToken: true });
+  tokenVendedor = loginCorreo.json.data?.access_token ?? '';
+  verificar(loginCorreo.status === 200 && loginCorreo.json.data?.usuario?.role === 'VENDEDOR', 'Login por correo (escrito en mayúsculas) → 200 como VENDEDOR', resumen(loginCorreo));
   const ruta404 = await api('GET', '/inexistente');
   verificar(ruta404.status === 404, 'Ruta desconocida → 404', resumen(ruta404));
 
@@ -178,6 +221,8 @@ async function flujo() {
   const B = await porCodigo('LTOO5'); // Argentina 2024 LOCAL XL, stock 1, costo 30
   const C = await porCodigo('ABC0001'); // Argentina 2026 DESPEDIDA M, stock 9
   verificar(A && B && C && A.stock_actual === 1 && B.stock_actual === 1 && C.stock_actual === 9, 'Variantes de prueba LTOO7, LTOO5 y ABC0001 localizadas');
+  const exacto = await api('GET', '/variantes?busqueda=LTOO5&limit=3');
+  verificar(exacto.status === 200 && exacto.json.data.items[0]?.codigo_legacy === 'LTOO5', 'Buscar «LTOO5» lista primero el código exacto (antes que LTOO50, LTOO51, LTOO52…)', JSON.stringify(exacto.json.data?.items?.map((v) => v.codigo_legacy)));
 
   seccion('Alta de productos y variantes');
   const prodDup = await api('POST', '/productos', { cuerpo: { categoria: 'camiseta', nombre: 'Argentina LOCAL', marca_equipo: 'Argentina', temporada_coleccion: '2024' } });
@@ -274,7 +319,7 @@ async function flujo() {
   const dash = await api('GET', '/ventas/dashboard');
   const dd = dash.json.data ?? {};
   const top = dd.top_productos?.[0];
-  verificar(dash.status === 200 && dd.ventas_confirmadas === 2 && dd.total_vendido === '90.00' && dd.costo_total_jrs === '60.00' && dd.ganancia_neta === '30.00' && dd.ticket_promedio === '45.00', `Dashboard: ${dd.ventas_confirmadas} ventas, ${dd.total_vendido} vendido, ${dd.costo_total_jrs} costo, ganancia ${dd.ganancia_neta}, margen ${dd.margen_porcentaje}%`, resumen(dash));
+  verificar(dash.status === 200 && dd.ventas_confirmadas === 2 && dd.total_vendido === '90.00' && dd.costo_total_jrs === '60.00' && dd.ganancia_neta === '30.00' && dd.ticket_promedio === '45.00' && dd.ventas_sin_costo === 0, `Dashboard: ${dd.ventas_confirmadas} ventas, ${dd.total_vendido} vendido, ${dd.costo_total_jrs} costo, ganancia ${dd.ganancia_neta}, margen ${dd.margen_porcentaje}%`, resumen(dash));
   verificar(top?.nombre === 'Argentina LOCAL' && top?.unidades === 2 && dd.por_metodo_pago?.length === 3, `Top producto: ${top?.nombre} (${top?.unidades} u.); desglose por 3 métodos de pago`, JSON.stringify(dd.por_metodo_pago));
   const hist = await api('GET', '/ventas?metodo_pago=TRANSFERENCIA&estado=CONFIRMADA');
   verificar(hist.status === 200 && hist.json.data.items.some((v) => v.id === v1.json.data?.id), 'GET /ventas filtra por método de pago y estado', resumen(hist));
@@ -297,17 +342,134 @@ async function flujo() {
   const cliCaido = await api('GET', `/clientes/${cliente.id}`);
   verificar(cliCaido.status === 503 && cliCaido.json.error_code === 'SERVICIO_NO_DISPONIBLE', 'El gateway responde 503 uniforme para ms-clientes caído', resumen(cliCaido));
 
-  seccion('Reversión manual de las ventas confirmadas de prueba');
+  seccion('Roles: el VENDEDOR no ve costos ni administra, y la venta queda a su nombre');
+  const comoVend = (metodo, ruta, op = {}) => api(metodo, ruta, { ...op, token: tokenVendedor });
+  const idV1 = v1.json.data?.id;
+  verificar(
+    sql(`SELECT vendedor_id FROM ms_ventas.ventas WHERE id = '${idV1}';`) === quien.admin.id,
+    'Venta del ADMIN: vendedor_id = id del usuario autenticado (X-User-Id del gateway)',
+  );
+  const vVar = await comoVend('GET', '/variantes?codigo_legacy=LTOO7');
+  const txtVar = JSON.stringify(vVar.json);
+  verificar(
+    vVar.status === 200 && vVar.json.data.items[0]?.codigo_legacy === 'LTOO7' && vVar.json.data.items[0].pvp_sugerido === '45.00' &&
+      !txtVar.includes('valor_jersey_club') && !txtVar.includes('rescatados'),
+    'VENDEDOR: /variantes llega sin valor_jersey_club (ni en observaciones) y con pvp_sugerido',
+    txtVar.slice(0, 260),
+  );
+  verificar(vVar.json.data.kpis?.valorizacion_costo_jrs === undefined && vVar.json.data.kpis?.valorizacion_pvp !== undefined, 'VENDEDOR: los KPIs no traen la valorización a costo');
+  const vDash = await comoVend('GET', '/ventas/dashboard');
+  verificar(
+    vDash.status === 200 && vDash.json.data.total_vendido !== undefined && vDash.json.data.costo_total_jrs === undefined &&
+      vDash.json.data.ganancia_neta === undefined && vDash.json.data.margen_porcentaje === undefined &&
+      vDash.json.data.por_metodo_pago.every((m) => m.ganancia_total === undefined) && vDash.json.data.top_productos.every((p) => p.ganancia_total === undefined),
+    'VENDEDOR: el dashboard muestra ventas pero no costo, margen ni ganancia',
+    JSON.stringify(vDash.json).slice(0, 260),
+  );
+  const costoAntes = sql(`SELECT valor_jersey_club FROM ms_inventario.variantes WHERE id = '${C.id}';`);
+  const prohibidos = [
+    ['PATCH', `/variantes/${C.id}/precios`, { valor_jersey_club: '1.00' }],
+    ['POST', '/productos', { categoria: 'GORRA', nombre: 'No permitido', marca_equipo: 'No' }],
+    ['POST', '/variantes', { producto_id: C.producto_id, talla_medida: 'S', version_modelo: 'FAN' }],
+    ['POST', '/stock/ajustes', { variante_id: C.id, tipo: 'AJUSTE_ENTRADA', cantidad: 5, observacion: 'No permitido' }],
+    ['POST', '/stock/reversiones', { referencia_id: idV1 }],
+    ['POST', `/ventas/${idV1}/anular`, { motivo: 'prueba de permisos' }],
+  ];
+  const resp403 = [];
+  for (const [metodo, ruta, cuerpo] of prohibidos) {
+    const r = await comoVend(metodo, ruta, { cuerpo, cabeceras: { 'Idempotency-Key': `e2e-403-${randomUUID()}` } });
+    resp403.push(r.status === 403 && r.json.error_code === 'ROL_NO_AUTORIZADO');
+  }
+  verificar(
+    resp403.every(Boolean) && sql(`SELECT valor_jersey_club FROM ms_inventario.variantes WHERE id = '${C.id}';`) === costoAntes && stockDe(A.id) === 0,
+    `VENDEDOR: ${prohibidos.length} operaciones de administración → 403 ROL_NO_AUTORIZADO sin efecto (precios, catálogo, stock y anulación)`,
+    JSON.stringify(resp403),
+  );
+  const vSale = await api('POST', '/ventas', {
+    token: tokenVendedor,
+    cabeceras: { 'Idempotency-Key': `e2e-venta-${randomUUID()}` },
+    cuerpo: { metodo_pago: 'EFECTIVO', vendedor_id: quien.admin.id, items: [{ variante_id: C.id, cantidad: 1, precio_venta_unitario: '40.00' }] },
+  });
+  const idVSale = vSale.json.data?.id;
+  if (idVSale) creado.ventas.add(idVSale);
+  verificar(vSale.status === 201 && vSale.json.data?.estado === 'CONFIRMADA', 'VENDEDOR registra una venta → 201', resumen(vSale));
+  verificar(
+    vSale.json.data?.vendedor_id === quien.vendedor.id && sql(`SELECT vendedor_id FROM ms_ventas.ventas WHERE id = '${idVSale}';`) === quien.vendedor.id,
+    'vendedor_id = X-User-Id del VENDEDOR, aunque el cuerpo traiga el id de otro usuario (no se puede falsear)',
+  );
+  verificar(
+    sql(`SELECT payload->>'vendedor_id' FROM ms_ventas.outbox_eventos WHERE agregado_id = '${idVSale}' AND tipo_evento = 'VentaConfirmada';`) === quien.vendedor.id,
+    'El evento VentaConfirmada del outbox lleva el vendedor_id del usuario autenticado',
+  );
+  verificar(
+    vSale.json.data?.costo_total_jrs === undefined && vSale.json.data?.ganancia_total === undefined && vSale.json.data?.detalle?.[0]?.valor_jersey_club_unitario === undefined,
+    'VENDEDOR: la respuesta de la venta no incluye costo ni ganancia',
+  );
+
+  seccion('Anulación de ventas (POST /ventas/:id/anular)');
+  const sinMotivo = await api('POST', `/ventas/${idV1}/anular`, { cuerpo: {} });
+  verificar(sinMotivo.status === 400 && stockDe(A.id) === 0, 'Sin motivo → 400 y no se mueve stock', resumen(sinMotivo));
+  const noExiste = await api('POST', `/ventas/${randomUUID()}/anular`, { cuerpo: { motivo: 'no existe' } });
+  verificar(noExiste.status === 404 && noExiste.json.error_code === 'VENTA_NO_ENCONTRADA', 'Venta inexistente → 404 VENTA_NO_ENCONTRADA', resumen(noExiste));
+  const anulRech = await api('POST', `/ventas/${idRechazada}/anular`, { cuerpo: { motivo: 'estaba rechazada' } });
+  verificar(anulRech.status === 409 && anulRech.json.error_code === 'VENTA_NO_ANULABLE', 'Venta RECHAZADA → 409 VENTA_NO_ANULABLE', resumen(anulRech));
+  const an = await api('POST', `/ventas/${idV1}/anular`, { cuerpo: { motivo: 'Cliente devolvió la camiseta' } });
+  verificar(
+    an.status === 200 && an.json.data?.estado === 'ANULADA' && an.json.data?.motivo_anulacion === 'Cliente devolvió la camiseta' &&
+      an.json.data?.anulada_por === quien.admin.id && !!an.json.data?.anulada_at,
+    `Anular venta CONFIRMADA → 200 ANULADA, con motivo, usuario y fecha (${an.json.data?.numero_comprobante})`,
+    resumen(an),
+  );
+  verificar(stockDe(A.id) === 1, 'El stock de LTOO7 volvió a PostgreSQL: 0 → 1');
+  const kardexAn = sql(`SELECT string_agg(tipo || ':' || cantidad || ':' || stock_anterior || '->' || stock_nuevo, ',' ORDER BY created_at) FROM ms_inventario.movimientos_stock WHERE referencia_id = '${idV1}';`);
+  verificar(kardexAn === 'VENTA:1:1->0,REVERSION_VENTA:1:0->1', `Kardex: ${kardexAn}`);
+  const eventos = sql(`SELECT string_agg(tipo_evento, ',' ORDER BY created_at) FROM ms_ventas.outbox_eventos WHERE agregado_id = '${idV1}';`);
+  const cargaAn = sql(`SELECT (payload->>'motivo') || '|' || (payload->>'anulada_por') || '|' || (payload->'items'->0->>'cantidad') FROM ms_ventas.outbox_eventos WHERE agregado_id = '${idV1}' AND tipo_evento = 'VentaAnulada';`);
+  verificar(eventos === 'VentaConfirmada,VentaAnulada' && cargaAn === `Cliente devolvió la camiseta|${quien.admin.id}|1`, `outbox_eventos: ${eventos} (VentaAnulada con motivo, usuario e ítems)`, cargaAn);
+  const an2 = await api('POST', `/ventas/${idV1}/anular`, { cuerpo: { motivo: 'segundo intento' } });
+  verificar(
+    an2.status === 200 && an2.headers.get('idempotent-replayed') === 'true' && stockDe(A.id) === 1 &&
+      Number(sql(`SELECT COUNT(*) FROM ms_ventas.outbox_eventos WHERE agregado_id = '${idV1}' AND tipo_evento = 'VentaAnulada';`)) === 1,
+    'Anular otra vez → 200 con Idempotent-Replayed; no devuelve stock ni duplica el evento',
+    resumen(an2),
+  );
+  const stockCAntes = stockDe(C.id);
+  const [p1, p2] = await Promise.all([1, 2].map((n) => api('POST', `/ventas/${idVSale}/anular`, { cuerpo: { motivo: `anulación simultánea ${n}` } })));
+  verificar(
+    p1.status === 200 && p2.status === 200 && stockDe(C.id) === stockCAntes + 1 &&
+      Number(sql(`SELECT COUNT(*) FROM ms_ventas.outbox_eventos WHERE agregado_id = '${idVSale}' AND tipo_evento = 'VentaAnulada';`)) === 1,
+    'Dos anulaciones simultáneas: el stock se devuelve una sola vez y queda un solo evento VentaAnulada',
+    `${resumen(p1)} | ${resumen(p2)}`,
+  );
+  const dashAn = await api('GET', '/ventas/dashboard');
+  verificar(
+    dashAn.status === 200 && dashAn.json.data.ventas_confirmadas === 2 && dashAn.json.data.total_vendido === '85.00' && dashAn.json.data.ventas_sin_costo === 1,
+    `El dashboard excluye las anuladas (${dashAn.json.data?.ventas_confirmadas} confirmadas, ${dashAn.json.data?.total_vendido}) y avisa que ${dashAn.json.data?.ventas_sin_costo} venta tiene productos sin costo cargado`,
+    resumen(dashAn),
+  );
+  const histAn = await api('GET', '/ventas?estado=ANULADA');
+  verificar(histAn.status === 200 && histAn.json.data.items.some((v) => v.id === idV1) && histAn.json.data.items.every((v) => v.estado === 'ANULADA'), 'GET /ventas?estado=ANULADA lista las anuladas');
+  const rr = await api('POST', '/stock/reversiones', { cabeceras: { 'Idempotency-Key': `e2e-rev-x-${idV1.slice(0, 8)}` }, cuerpo: { referencia_id: idV1 } });
+  verificar(rr.status === 200 && rr.headers.get('idempotent-replayed') === 'true' && stockDe(A.id) === 1, 'Reversión directa sobre una venta ya anulada → 200 sin mover stock', resumen(rr));
+
+  seccion('Anular las ventas de prueba que siguen confirmadas');
   const confirmadas = sql(`SELECT id FROM ms_ventas.ventas WHERE estado = 'CONFIRMADA' AND id IN (${lista([...creado.ventas])});`).split('\n').filter(Boolean);
   for (const id of confirmadas) {
-    const r = await api('POST', '/stock/reversiones', { cabeceras: { 'Idempotency-Key': `e2e-rev-${id}` }, cuerpo: { referencia_id: id, motivo: 'Limpieza prueba E2E' } });
-    verificar(r.status === 201, `Reversión de la venta ${id.slice(0, 8)} → 201`, resumen(r));
-  }
-  if (confirmadas[0]) {
-    const rr = await api('POST', '/stock/reversiones', { cabeceras: { 'Idempotency-Key': `e2e-rev-x-${confirmadas[0].slice(0, 8)}` }, cuerpo: { referencia_id: confirmadas[0] } });
-    verificar(rr.status === 200 && rr.headers.get('idempotent-replayed') === 'true', 'Reversión repetida (otra clave) → 200 sin mover stock', resumen(rr));
+    const r = await api('POST', `/ventas/${id}/anular`, { cuerpo: { motivo: 'Limpieza de la prueba E2E' } });
+    verificar(r.status === 200 && r.json.data?.estado === 'ANULADA', `Anular venta ${id.slice(0, 8)} → 200 ANULADA`, resumen(r));
   }
   verificar(stockDe(A.id) === 1 && stockDe(B.id) === 1 && stockDe(C.id) === 9, 'Stock de LTOO7, LTOO5 y ABC0001 restaurado (1, 1, 9)');
+
+  seccion('Bloqueo tras intentos fallidos de inicio de sesión');
+  let bloqueadoEn = 0;
+  for (let i = 1; i <= 7 && !bloqueadoEn; i++) {
+    const r = await api('POST', '/auth/login', { cuerpo: { usuario: quien.admin.username, contrasena: `mala-${i}` }, sinToken: true });
+    if (r.status === 429) bloqueadoEn = i;
+  }
+  // El contador se reinició con el último login correcto: 5 intentos fallidos se registran y el sexto se bloquea.
+  verificar(bloqueadoEn === 6, `Tras 5 intentos fallidos el sexto recibe 429 (bloqueado en el intento ${bloqueadoEn})`);
+  const bloqCorrecta = await api('POST', '/auth/login', { cuerpo: { usuario: quien.admin.username, contrasena: quien.admin.clave }, sinToken: true });
+  verificar(bloqCorrecta.status === 429 && bloqCorrecta.json.error_code === 'DEMASIADOS_INTENTOS', 'Durante el bloqueo ni la contraseña correcta entra → 429 DEMASIADOS_INTENTOS', resumen(bloqCorrecta));
 }
 
 async function limpiar(ventasPrevias) {
@@ -324,9 +486,10 @@ async function limpiar(ventasPrevias) {
     DELETE FROM ms_inventario.variantes WHERE producto_id IN (${productos});
     DELETE FROM ms_inventario.productos WHERE id IN (${productos});
     DELETE FROM ms_clientes.clientes WHERE id IN (${clientes});
+    DELETE FROM ms_auth.usuarios WHERE id IN (${lista(creado.usuarios)});
     COMMIT;`);
   if (ventasPrevias === 0) sql('ALTER SEQUENCE ms_ventas.seq_numero_comprobante RESTART WITH 1;');
-  console.log(`  ventas: ${creado.ventas.size}, productos: ${creado.productos.size}, clientes: ${creado.clientes.size} eliminados`);
+  console.log(`  ventas: ${creado.ventas.size}, productos: ${creado.productos.size}, clientes: ${creado.clientes.size}, usuarios: ${creado.usuarios.length} eliminados`);
 }
 
 main()

@@ -1,4 +1,5 @@
 import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+import type { Request } from 'express';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
 import type { RequestConCorrelacion } from './correlation-id.middleware';
@@ -8,6 +9,30 @@ import { ErrorNegocio } from './errores.filter';
 export const CorrelationId = createParamDecorator(
   (_dato: unknown, ctx: ExecutionContext): string =>
     ctx.switchToHttp().getRequest<RequestConCorrelacion>().correlationId ?? '',
+);
+
+export interface UsuarioContexto {
+  id: string | null;
+  role: 'ADMIN' | 'VENDEDOR' | null;
+}
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Usuario autenticado que el gateway propaga en `X-User-Id` y `X-User-Role`.
+ * Los microservicios confían en estas cabeceras: solo deben ser alcanzables desde el gateway.
+ */
+export const UsuarioActual = createParamDecorator(
+  (_dato: unknown, ctx: ExecutionContext): UsuarioContexto => {
+    const req = ctx.switchToHttp().getRequest<Request>();
+    const id = req.header('x-user-id');
+    const role = req.header('x-user-role');
+    return {
+      id: id && UUID_REGEX.test(id) ? id : null,
+      role: role === 'ADMIN' || role === 'VENDEDOR' ? role : null,
+    };
+  },
 );
 
 /**

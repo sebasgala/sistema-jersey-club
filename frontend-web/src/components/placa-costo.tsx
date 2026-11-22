@@ -104,14 +104,14 @@ export function EditorPrecios({
       className={cx("animate-entrar", enLinea ? "flex flex-wrap items-end gap-2" : "grid gap-3")}
     >
       <div className={cx("grid gap-2", enLinea ? "grid-cols-2 sm:w-64" : "grid-cols-2")}>
-        <label className="flex flex-col gap-1 text-[0.75rem] font-semibold">
+        <label className="flex flex-col gap-1 text-[0.78rem] font-semibold">
           Costo JRS
           <span className="relative">
             <span className="absolute inset-y-0 left-2.5 flex items-center text-gris">$</span>
             <input autoFocus inputMode="decimal" value={costo} onChange={(e) => setCosto(e.target.value)} placeholder="0.00" className={entrada} />
           </span>
         </label>
-        <label className="flex flex-col gap-1 text-[0.75rem] font-semibold">
+        <label className="flex flex-col gap-1 text-[0.78rem] font-semibold">
           PVP sugerido
           <span className="relative">
             <span className="absolute inset-y-0 left-2.5 flex items-center text-gris">$</span>

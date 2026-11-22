@@ -308,6 +308,53 @@ export function Hoja({
   );
 }
 
+// ------------------------------------------------------------------ Diálogo de confirmación (centrado en PC, anclado abajo en celular)
+export function Dialogo({
+  abierto,
+  alCerrar,
+  titulo,
+  children,
+  pie,
+  bloqueado = false,
+}: {
+  abierto: boolean;
+  alCerrar: () => void;
+  titulo: string;
+  children: ReactNode;
+  pie: ReactNode;
+  /** Mientras hay una operación en curso no se puede cerrar. */
+  bloqueado?: boolean;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    if (abierto && !d.open) d.showModal();
+    if (!abierto && d.open) d.close();
+  }, [abierto]);
+  return (
+    <dialog
+      ref={ref}
+      onCancel={(e) => {
+        if (bloqueado) e.preventDefault();
+      }}
+      onClose={() => {
+        if (!bloqueado) alCerrar();
+      }}
+      onClick={(e) => {
+        if (e.target === ref.current && !bloqueado) alCerrar();
+      }}
+      className="m-auto w-[min(32rem,calc(100%-2rem))] rounded-xl bg-papel p-0 text-tinta shadow-[var(--shadow-flota)] backdrop:bg-tinta/50 backdrop:backdrop-blur-[2px] open:animate-entrar max-sm:mb-0 max-sm:w-full max-sm:max-w-none max-sm:rounded-b-none"
+    >
+      <div className="flex flex-col">
+        <h2 className="cifra border-b border-linea bg-blanco px-5 py-4 text-[1.45rem] leading-tight font-bold">{titulo}</h2>
+        <div className="px-5 py-5">{children}</div>
+        <footer className="flex flex-col-reverse gap-2 border-t border-linea bg-blanco px-5 py-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] sm:flex-row sm:justify-end">{pie}</footer>
+      </div>
+    </dialog>
+  );
+}
+
 // ------------------------------------------------------------------ Notificaciones
 type Nota = { id: number; tono: "ok" | "error" | "info"; texto: string };
 const ContextoNotas = createContext<(tono: Nota["tono"], texto: string) => void>(() => {});

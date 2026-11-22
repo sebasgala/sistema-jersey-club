@@ -13,6 +13,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { normalizarDinero, PATRON_DINERO } from '../../common/dinero.util';
@@ -152,4 +153,13 @@ export class DashboardDto {
   @IsOptional()
   @Matches(FECHA, { message: 'hasta debe tener formato AAAA-MM-DD' })
   hasta?: string;
+}
+
+export class AnularVentaDto {
+  /** Motivo obligatorio: queda en la venta y en el evento VentaAnulada. */
+  @Transform(recortar)
+  @IsString()
+  @MinLength(3)
+  @MaxLength(300)
+  motivo!: string;
 }

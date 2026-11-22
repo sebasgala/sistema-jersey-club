@@ -31,6 +31,8 @@ const MENSAJES: Record<string, string> = {
   SERVICIO_NO_DISPONIBLE: "Ese módulo no responde en este momento. Intenta de nuevo en unos segundos.",
   TIEMPO_AGOTADO: "El servidor tardó demasiado en responder. Intenta de nuevo.",
   CREDENCIALES_INVALIDAS: "Usuario o contraseña incorrectos.",
+  ROL_NO_AUTORIZADO: "Tu rol no permite esta acción. Pídesela a un administrador.",
+  VENTA_NO_ANULABLE: "Esta venta ya no se puede anular.",
   DEMASIADOS_INTENTOS: "Demasiados intentos fallidos. Espera 15 minutos antes de volver a intentar.",
   INVENTARIO_NO_DISPONIBLE: "El inventario no responde, así que la venta no se registró. Intenta de nuevo en unos segundos.",
 };

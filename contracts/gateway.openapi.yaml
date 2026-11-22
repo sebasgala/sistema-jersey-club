@@ -1,12 +1,27 @@
 openapi: 3.0.3
 info:
   title: Jersey Club — gateway
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Punto único de entrada (`http://localhost:3010/api/v1`).
 
-    **Autenticación:** todas las rutas exigen `Authorization: Bearer <JWT>` salvo `POST /auth/login`
+    **Autenticación y roles:** todas las rutas exigen `Authorization: Bearer <JWT>` salvo `POST /auth/login`
     y `GET /salud`. Sin token o con token inválido → `401 NO_AUTENTICADO` / `TOKEN_INVALIDO`.
+    Los usuarios viven en `ms_auth.usuarios` (se crean con `npm run crear-usuario` en `gateway/`; no hay
+    usuarios por defecto). El JWT lleva `sub` (id), `username`, `email`, `nombre` y `role` (`ADMIN` | `VENDEDOR`).
+
+    | Operación | ADMIN | VENDEDOR |
+    |---|---|---|
+    | Leer productos, variantes, stock, ventas, clientes y dashboard | sí | sí, **sin** costos ni ganancias |
+    | Registrar ventas (`POST /ventas`) | sí | sí |
+    | Crear y editar clientes | sí | sí |
+    | Crear/editar productos y variantes, `PATCH /variantes/{id}/precios` | sí | `403 ROL_NO_AUTORIZADO` |
+    | `POST /stock/ajustes`, `/stock/descuentos`, `/stock/reversiones` | sí | `403 ROL_NO_AUTORIZADO` |
+    | `POST /ventas/{id}/anular` | sí | `403 ROL_NO_AUTORIZADO` |
+
+    Para un `VENDEDOR` el gateway elimina de **todas** las respuestas JSON los campos `valor_jersey_club`,
+    `valor_jersey_club_unitario`, `costo_unitario`, `costo_total_jrs`, `ganancia_total`, `ganancia_linea`,
+    `ganancia_neta`, `margen_porcentaje` y `valorizacion_costo_jrs` (y las notas de costo dentro de `observaciones`).
 
     **Enrutamiento** (mismo path y query string hacia el servicio dueño):
 
@@ -17,12 +32,12 @@ info:
     | `/clientes` | ms-clientes (:3013) | `ms-clientes.openapi.yaml` |
 
     **Cabeceras:** propaga `Idempotency-Key`, `Content-Type` y `X-Correlation-Id` (lo genera si no llega);
-    agrega `X-Usuario` con el usuario del token. Devuelve `Location`, `Idempotent-Replayed` y `X-Correlation-Id`.
+    agrega `X-User-Id` y `X-User-Role` con el usuario del token (las que envíe el cliente se descartan). Devuelve `Location`, `Idempotent-Replayed` y `X-Correlation-Id`.
     El cuerpo y el código HTTP del servicio se devuelven sin cambios.
 
     **Errores propios:** `503 SERVICIO_NO_DISPONIBLE` si el servicio no responde, `504 TIEMPO_AGOTADO`
     si supera 15 s, `404` para rutas desconocidas, `429 DEMASIADOS_INTENTOS` tras 5 logins fallidos
-    por IP en 15 minutos. Formato `{ status, error, details[], error_code, correlation_id }`.
+    por IP en 15 minutos (el sexto intento se bloquea), `403 ROL_NO_AUTORIZADO`. Formato `{ status, error, details[], error_code, correlation_id }`.
 servers:
   - url: http://localhost:3010/api/v1
     description: Local
@@ -35,8 +50,11 @@ paths:
   /auth/login:
     post:
       tags: [auth]
-      summary: Iniciar sesión como administrador
-      description: Usuario y hash scrypt de la contraseña se configuran en `gateway/.env` (`ADMIN_USUARIO`, `ADMIN_PASSWORD_HASH`).
+      summary: Iniciar sesión con usuario o correo
+      description: |
+        Busca en `ms_auth.usuarios` por `username` o `email` (sin distinguir mayúsculas) y verifica la contraseña
+        con bcrypt. Un usuario inexistente, desactivado o con contraseña errónea recibe el mismo `401
+        CREDENCIALES_INVALIDAS`. Tras 5 intentos fallidos desde una IP, el siguiente se bloquea 15 minutos (`429`).
       operationId: login
       security: []
       requestBody:
@@ -48,7 +66,7 @@ paths:
               additionalProperties: false
               required: [usuario, contrasena]
               properties:
-                usuario: { type: string, maxLength: 100, example: admin }
+                usuario: { type: string, maxLength: 150, example: admin@jerseyclub.ec, description: Nombre de usuario o correo }
                 contrasena: { type: string, maxLength: 200 }
       responses:
         '200':
@@ -69,8 +87,11 @@ paths:
                       usuario:
                         type: object
                         properties:
+                          id: { type: string, format: uuid }
+                          username: { type: string }
+                          email: { type: string, format: email }
                           nombre: { type: string }
-                          rol: { type: string, example: ADMIN }
+                          role: { type: string, enum: [ADMIN, VENDEDOR] }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }

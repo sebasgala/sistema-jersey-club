@@ -62,7 +62,7 @@ export function SelectorCliente({
   if (valor.modo === "REGISTRADO" || valor.modo === "RESPALDO") {
     const c = valor.modo === "REGISTRADO" ? valor.cliente : valor.datos;
     return (
-      <div className="flex items-start gap-3 rounded-[var(--radius-placa)] border border-tinta bg-blanco p-4">
+      <div className="flex items-start gap-3 border-y border-linea-2 py-3">
         <span className="metal grid size-10 shrink-0 place-items-center rounded-full">
           <UserRound className="size-5" />
         </span>
@@ -85,7 +85,7 @@ export function SelectorCliente({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-3 rounded-[var(--radius-placa)] border border-linea bg-blanco p-3">
+      <div className="flex items-center gap-3 border-y border-linea-2 py-3">
         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-tinta text-plata-2">
           <Users className="size-5" />
         </span>
