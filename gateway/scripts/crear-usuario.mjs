@@ -45,6 +45,8 @@ const cliente = new pg.Client({
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
+  // DB_SSL=true para bases gestionadas (Supabase/Neon).
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
 });
 
 try {

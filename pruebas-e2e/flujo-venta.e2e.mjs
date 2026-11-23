@@ -11,7 +11,7 @@
  * 4. Detiene los procesos.
  *
  * Requisitos: contenedor pg-jersey-club arriba, esquema aplicado (incluye ms_auth),
- * servicios compilados (npm run build) y puertos 3010-3013 libres. No necesita credenciales:
+ * servicios compilados (npm run build) y puertos libres (por defecto 3010-3013; E2E_PUERTO_BASE=4010 usa 4010-4013). No necesita credenciales:
  * crea y borra sus propios usuarios de prueba.
  *
  *   node pruebas-e2e/flujo-venta.e2e.mjs
@@ -23,13 +23,26 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..');
-const GATEWAY = process.env.E2E_GATEWAY_URL ?? 'http://localhost:3010/api/v1';
+// E2E_PUERTO_BASE permite correr la prueba junto a servicios ya levantados (p. ej. 4010 -> 4010-4013).
+const BASE = Number(process.env.E2E_PUERTO_BASE ?? 3010);
+const P = { gateway: BASE, 'ms-inventario': BASE + 1, 'ms-ventas': BASE + 2, 'ms-clientes': BASE + 3 };
+const GATEWAY = process.env.E2E_GATEWAY_URL ?? `http://localhost:${P.gateway}/api/v1`;
 const SERVICIOS = [
-  { nombre: 'ms-inventario', puerto: 3011 },
-  { nombre: 'ms-clientes', puerto: 3013 },
-  { nombre: 'ms-ventas', puerto: 3012 },
-  { nombre: 'gateway', puerto: 3010 },
+  { nombre: 'ms-inventario', puerto: P['ms-inventario'] },
+  { nombre: 'ms-clientes', puerto: P['ms-clientes'] },
+  { nombre: 'ms-ventas', puerto: P['ms-ventas'] },
+  { nombre: 'gateway', puerto: P.gateway },
 ];
+const URL_INV = `http://localhost:${P['ms-inventario']}`;
+const URL_CLI = `http://localhost:${P['ms-clientes']}`;
+const URL_VEN = `http://localhost:${P['ms-ventas']}`;
+/** Variables que apuntan cada servicio a los puertos de esta corrida (mandan sobre el .env). */
+const ENV_SERVICIO = {
+  'ms-inventario': {},
+  'ms-clientes': {},
+  'ms-ventas': { INVENTARIO_URL: `${URL_INV}/api/v1`, CLIENTES_URL: `${URL_CLI}/api/v1` },
+  gateway: { INVENTARIO_URL: URL_INV, VENTAS_URL: URL_VEN, CLIENTES_URL: URL_CLI },
+};
 const CEDULA_PRUEBA = '1710034065'; // cédula sintética válida (módulo 10)
 
 // ----------------------------------------------------------------------------- utilidades
@@ -81,7 +94,7 @@ const procesos = new Map();
 function arrancar({ nombre }) {
   mkdirSync(join(RAIZ, 'pruebas-e2e', 'logs'), { recursive: true });
   const log = openSync(join(RAIZ, 'pruebas-e2e', 'logs', `${nombre}.log`), 'w');
-  const p = spawn(process.execPath, ['dist/main'], { cwd: join(RAIZ, nombre), stdio: ['ignore', log, log] });
+  const p = spawn(process.execPath, ['dist/main'], { cwd: join(RAIZ, nombre), stdio: ['ignore', log, log], env: { ...process.env, PORT: String(P[nombre]), ...ENV_SERVICIO[nombre] } });
   closeSync(log);
   procesos.set(nombre, p);
 }
@@ -215,7 +228,11 @@ async function flujo() {
   const kpis = lista1.json.data.kpis;
   verificar(kpis.total_skus === 3 && kpis.unidades_stock === 3 && kpis.valorizacion_costo_jrs === '90.00', `KPIs filtrados: ${kpis.total_skus} SKUs, ${kpis.unidades_stock} u., costo ${kpis.valorizacion_costo_jrs}`, JSON.stringify(kpis));
   const global = (await api('GET', '/variantes?limit=1')).json.data.kpis;
-  verificar(global.total_skus === 95 && global.unidades_stock === 153 && global.skus_sin_costo === 80, `KPIs globales: ${global.total_skus} SKUs, ${global.unidades_stock} u., ${global.skus_sin_costo} sin costo`, JSON.stringify(global));
+  // Se compara contra la base en vivo (no contra cifras fijas del Excel original, que cambian al cargar pedidos).
+  const [esperadoSkus, esperadoUnidades, esperadoSinCosto] = sql(
+    `SELECT COUNT(*), COALESCE(SUM(stock_actual), 0), COUNT(*) FILTER (WHERE valor_jersey_club = 0) FROM ms_inventario.variantes;`,
+  ).split('|').map(Number);
+  verificar(global.total_skus === esperadoSkus && global.unidades_stock === esperadoUnidades && global.skus_sin_costo === esperadoSinCosto, `KPIs globales: ${global.total_skus} SKUs, ${global.unidades_stock} u., ${global.skus_sin_costo} sin costo`, JSON.stringify(global));
   const porCodigo = async (c) => (await api('GET', `/variantes?codigo_legacy=${c}`)).json.data.items[0];
   const A = await porCodigo('LTOO7'); // Argentina 2024 LOCAL M, stock 1, costo 30
   const B = await porCodigo('LTOO5'); // Argentina 2024 LOCAL XL, stock 1, costo 30

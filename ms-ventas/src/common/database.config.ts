@@ -11,8 +11,14 @@ export function opcionesTypeOrm(config: ConfigService): TypeOrmModuleOptions {
   if (!/^ms_[a-z_]+$/.test(esquema)) {
     throw new Error(`DB_SCHEMA inválido: ${esquema}`);
   }
+  // DB_SSL=true para bases gestionadas (Supabase/Neon); en local (Docker) queda desactivado.
+  const ssl =
+    config.get<string>('DB_SSL') === 'true'
+      ? { rejectUnauthorized: false }
+      : false;
   return {
     type: 'postgres',
+    ssl,
     host: config.getOrThrow<string>('DB_HOST'),
     port: Number(config.getOrThrow<string>('DB_PORT')),
     database: config.getOrThrow<string>('DB_NAME'),
@@ -23,6 +29,6 @@ export function opcionesTypeOrm(config: ConfigService): TypeOrmModuleOptions {
     synchronize: false,
     migrationsRun: false,
     applicationName: config.get<string>('SERVICE_NAME', 'jersey-club'),
-    extra: { options: `-c search_path=${esquema}` },
+    extra: { options: `-c search_path=${esquema}`, ...(ssl ? { ssl } : {}) },
   };
 }

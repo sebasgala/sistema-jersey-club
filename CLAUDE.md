@@ -50,6 +50,18 @@ Documentos de contexto (leer antes de diseñar o cambiar contratos):
 - `ms-ventas` escribe en `outbox_eventos` (evento `VentaConfirmada`) en la misma transacción que confirma la venta. En el MVP no hay relay.
 - Estados de venta: `PENDIENTE` → `CONFIRMADA` | `RECHAZADA` | `FALLIDA` (con compensación vía `POST /api/v1/stock/reversiones`). Una venta `CONFIRMADA` puede pasar a `ANULADA` con `POST /api/v1/ventas/:id/anular` (devuelve el stock exacto al Kardex como `REVERSION_VENTA`, guarda motivo y usuario, y registra `VentaAnulada` en el outbox); es idempotente y las anuladas no cuentan en el dashboard.
 
+### Visión objetivo de las directrices (reglas inquebrantables de diseño, validación y despliegue)
+
+Las cuatro directrices rigen también lo que aún no está construido. Todo servicio futuro nace bajo ellas; en el MVP se implementa lo descrito arriba.
+
+1. **Arquitectura Modular:** bloques independientes e interconectados: `Inventario`, `Ventas/Facturación`, `Compras/Logística`, `RRHH` y `Clientes`. El fallo, mantenimiento o redespliegue de un módulo no detiene a los demás ni acopla sus bases de datos (sin FK ni JOIN entre esquemas; UUID lógicos y snapshots).
+2. **Integridad del Inventario:** ninguna venta o factura se procesa ni se confirma con stock insuficiente de la variante exacta (camiseta, talla, versión, parches). Stock y Kardex se actualizan de forma atómica y en tiempo real ante toda compra, venta o anulación (hoy: venta, anulación y ajustes; las compras llegarán con `ms-compras`).
+3. **Trazabilidad de Costos en Compras:** `ms-compras` prorrateará los costos de importación internacional (flete por volumen o libra, manejo de courier) y los indexará al costo base unitario de cada camiseta, de modo que el margen real de cada venta se calcule automáticamente. El contrato ya lo prevé con `origen_costo` (`IMPORTACION`) sin romper `v1`.
+4. **Flujo Comercial Cerrado:** la facturación está acoplada al módulo de ventas: registra los datos del cliente según la normativa de Ecuador (cédula, RUC, pasaporte, consumidor final) y dispara en una sola operación la baja de inventario y, cuando exista `ms-rrhh`, el cálculo y registro de la comisión del vendedor (hoy se guarda `vendedor_id` y el evento `VentaConfirmada` en el outbox).
+
+Ante cualquier conflicto entre una petición y estas directrices se detiene el trabajo y se consulta, como indica el encabezado de este archivo.
+
+
 ---
 
 ## 2. Puertos Locales (asignados el 2026-11-21)

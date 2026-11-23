@@ -2,6 +2,9 @@
 
 Diagramas en Mermaid (se ven en la vista previa de VS Code con la extensión de Mermaid).
 
+> **Directrices de diseño obligatorias** (texto completo en [CLAUDE.md](../CLAUDE.md), sección 1): arquitectura modular sin acoplar bases de datos; integridad de inventario por variante exacta con Kardex atómico; trazabilidad de costos con prorrateo de importación en `ms-compras`; flujo comercial cerrado con identificación ecuatoriana y comisión del vendedor en `ms-rrhh`. Todo cambio de arquitectura debe respetarlas.
+
+
 ## 1. Vista general
 
 El navegador solo habla con el gateway. Cada microservicio es dueño de su propio esquema en PostgreSQL y nunca consulta el de otro.
