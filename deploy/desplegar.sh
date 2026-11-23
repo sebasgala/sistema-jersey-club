@@ -31,6 +31,7 @@ paso_infra() {
   az extension add --name containerapp --upgrade --only-show-errors
   az provider register --namespace Microsoft.App --wait
   az provider register --namespace Microsoft.OperationalInsights --wait
+  az provider register --namespace Microsoft.ContainerRegistry --wait
   [[ "$(az group exists -n "$RG")" == "true" ]] || az group create -n "$RG" -l "$LOC"
   az acr create -n "$ACR" -g "$RG" --sku Basic --admin-enabled true
   az containerapp env create -n "$CAE" -g "$RG" -l "$LOC"
