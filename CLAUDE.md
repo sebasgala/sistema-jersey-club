@@ -174,6 +174,25 @@ Error:
 - **Cambios de esquema:** solo aditivos e idempotentes en `01_schema_mvp_jersey_club.sql` (`ADD COLUMN IF NOT EXISTS`), reaplicables sobre una base existente.
 - **Antes de dar por terminada una funcionalidad** se ejecuta `pruebas-e2e/flujo-venta.e2e.mjs` (no necesita credenciales: crea y borra sus propios usuarios en `ms_auth`); debe terminar con todas las verificaciones OK y la huella de la base intacta.
 
+### Entorno productivo (Azure + Supabase)
+
+- **Región:** `northcentralus` (la política de la suscripción de estudiante solo permite `francecentral`, `chilecentral`, `switzerlandnorth`, `northcentralus` y `belgiumcentral`). Grupo de recursos `rg-jersey-club`, registro `acrjerseyclubsebas2026`, entorno `cae-jersey-club` en modo `WorkloadProfiles` (el modo "Express" no admite ingreso interno entre servicios).
+- **Topología:** `gateway` y `frontend-web` con ingreso externo; `ms-inventario`, `ms-ventas` y `ms-clientes` con ingreso **interno** (nunca se exponen). Base PostgreSQL en Supabase (`us-east-1`, Session pooler, `DB_SSL=true`).
+- **Frontend:** Azure Static Web Apps está bloqueada por la política en todas sus regiones, así que `frontend-web` corre como Container App con Nginx (`frontend-web/Dockerfile`). `NEXT_PUBLIC_API_URL` se graba en el build; `CORS_ORIGINS` del gateway debe ser el origen exacto del frontend, sin barra final.
+- **Imágenes:** se construyen con Docker y se suben al ACR (`az acr build` está bloqueado: `TasksOperationsNotAllowed`). Todo el despliegue se hace con `deploy/desplegar.sh`; `deploy/variables.sh` (secretos) nunca se versiona.
+- **Ahorro de créditos:** todas las Container Apps (`ms-inventario`, `ms-ventas`, `ms-clientes`, `gateway`, `frontend-web`) operan con **`min-replicas 0`** y escalan a cero sin tráfico. Consecuencia conocida: la primera petición tras un rato inactivo puede tardar unos segundos y el gateway puede responder `503` (timeouts de 3 s y 2 s) hasta que los servicios despierten. No se sube a 1 por defecto.
+- **Subir temporalmente a 1 réplica (demo o jornada intensiva)** y volver a 0 al terminar:
+
+```bash
+for a in ms-inventario ms-ventas ms-clientes gateway frontend-web; do
+  az containerapp update -n "$a" -g rg-jersey-club --min-replicas 1
+done
+# al terminar:
+for a in ms-inventario ms-ventas ms-clientes gateway frontend-web; do
+  az containerapp update -n "$a" -g rg-jersey-club --min-replicas 0
+done
+```
+
 ## 6. Versiones de Dependencias
 
 - NestJS 11 (generado por `@nestjs/cli@11`). `@nestjs/swagger` está fijado a `^11` porque la serie 12 exige NestJS 12; no usar `--force` ni `--legacy-peer-deps` para saltarse conflictos de peers.
