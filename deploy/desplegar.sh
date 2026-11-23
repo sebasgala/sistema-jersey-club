@@ -34,12 +34,24 @@ paso_infra() {
   az provider register --namespace Microsoft.ContainerRegistry --wait
   [[ "$(az group exists -n "$RG")" == "true" ]] || az group create -n "$RG" -l "$LOC"
   az acr create -n "$ACR" -g "$RG" --sku Basic --admin-enabled true
-  az containerapp env create -n "$CAE" -g "$RG" -l "$LOC"
+  # Entorno estándar en modo WorkloadProfiles (perfil Consumption): admite ingreso interno
+  # entre servicios y allowInsecure. NO usar entornos "express": no sirven para esto.
+  az containerapp env create -n "$CAE" -g "$RG" -l "$LOC" --environment-mode WorkloadProfiles
 }
 
+# Construye con Docker y sube al ACR. No usa `az acr build` porque ACR Tasks está bloqueado en las
+# suscripciones de estudiante (TasksOperationsNotAllowed). En WSL sin Docker propio se usa el de
+# Windows: DOCKER=docker.exe bash deploy/desplegar.sh imagenes
 paso_imagenes() {
+  local docker="${DOCKER:-docker}"
+  command -v "$docker" >/dev/null || { echo "No se encuentra '$docker'. Define DOCKER=docker.exe si usas WSL." >&2; exit 1; }
+  credenciales_acr
+  # La contraseña viaja por stdin: no queda en el historial ni en la salida.
+  az acr credential show -n "$ACR" --query "passwords[0].value" -o tsv | tr -d '
+'     | "$docker" login "$ACR_SRV" -u "$ACR_USER" --password-stdin
   for s in ms-inventario ms-ventas ms-clientes gateway; do
-    az acr build -r "$ACR" -g "$RG" -t "$s:$TAG" "./$s"
+    "$docker" build --platform linux/amd64 -t "$ACR_SRV/$s:$TAG" "./$s"
+    "$docker" push "$ACR_SRV/$s:$TAG"
   done
 }
 
@@ -57,6 +69,14 @@ crear_interno() { # nombre puerto esquema [vars extra...]
     --ingress internal --target-port "$puerto" "${LIMITES[@]}" \
     --secrets "db-pass=$DB_PASSWORD" \
     --env-vars "PORT=$puerto" $(vars_db "$esquema") "$@"
+  # Los servicios son internos: se permite http dentro del entorno (http://<nombre>).
+  # (Azure puede tardar unos segundos en registrar la app recién creada: se reintenta.)
+  local i
+  for i in 1 2 3 4 5 6; do
+    az containerapp ingress update -n "$nombre" -g "$RG" --allow-insecure >/dev/null 2>&1 && return 0
+    sleep 10
+  done
+  echo "No se pudo activar allowInsecure en $nombre" >&2; return 1
 }
 
 paso_servicios() {
