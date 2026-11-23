@@ -4,10 +4,10 @@
 # Ejecutar DESDE LA RAÍZ del repositorio, paso a paso:
 #   source deploy/variables.sh
 #   bash deploy/desplegar.sh infra        # 1. proveedores, grupo de recursos, ACR, entorno
-#   bash deploy/desplegar.sh imagenes     # 2. construye las 4 imágenes en Azure (sin Docker local)
+#   DOCKER=docker.exe bash deploy/desplegar.sh imagenes   # 2. docker build/push de las 4 imágenes al ACR (en WSL usa el Docker de Windows)
 #   bash deploy/desplegar.sh servicios    # 3. microservicios internos + gateway público
-#   bash deploy/desplegar.sh frontend     # 4. Static Web App y publicación de frontend-web/out
-#   bash deploy/desplegar.sh cors         # 5. ajusta CORS del gateway con FRONTEND_URL
+#   bash deploy/desplegar.sh frontend     # 4. frontend: Static Web App o, si la política la bloquea, Container App con Nginx (ajusta CORS solo)
+#   bash deploy/desplegar.sh cors         # 5. (opcional) fija CORS a mano con FRONTEND_URL
 #
 # Requisitos: `az login` hecho, `source deploy/variables.sh` en la misma terminal, Node 22 para el frontend.
 # Antes: aplicar database/01_schema_mvp_jersey_club.sql y 02_seed_inventario.sql en Supabase.
@@ -103,20 +103,77 @@ paso_servicios() {
   echo "Gateway público: https://$GW/api/v1/salud"
 }
 
+# CORS del gateway con el origen exacto del frontend (sin barra final).
+aplicar_cors() {
+  local origen="${1%/}"
+  az containerapp update -n gateway -g "$RG" --set-env-vars "CORS_ORIGINS=$origen" >/dev/null
+  echo "CORS_ORIGINS del gateway = $origen"
+}
+
+# Intenta Azure Static Web Apps en cada región de SWA_LOCS (por defecto: centralus westeurope).
+# Devuelve 0 si se creó, 2 si la política de la suscripción la bloquea en todas (RequestDisallowedByAzure)
+# y 1 ante cualquier otro error (que sí se muestra).
+crear_swa() {
+  local loc salida bloqueadas=0 total=0
+  for loc in ${SWA_LOCS:-centralus westeurope}; do
+    total=$((total + 1))
+    if salida=$(az staticwebapp create -n "$SWA" -g "$RG" -l "$loc" --sku Free 2>&1); then
+      echo "Static Web App creada en $loc"; return 0
+    fi
+    if grep -q "RequestDisallowedByAzure" <<<"$salida"; then
+      echo "Static Web Apps bloqueada por política en $loc"; bloqueadas=$((bloqueadas + 1))
+    else
+      echo "$salida" >&2; return 1
+    fi
+  done
+  [[ $bloqueadas -eq $total ]] && return 2
+  return 1
+}
+
+frontend_swa() {
+  local api=$1 host token
+  host=$(az staticwebapp show -n "$SWA" -g "$RG" --query defaultHostname -o tsv | tr -d '')
+  aplicar_cors "https://$host"
+  (cd frontend-web && npm ci && NEXT_PUBLIC_API_URL="$api" npm run build)
+  token=$(az staticwebapp secrets list -n "$SWA" -g "$RG" --query properties.apiKey -o tsv | tr -d '')
+  npx --yes @azure/static-web-apps-cli deploy ./frontend-web/out --deployment-token "$token" --env production
+  echo "URL pública del frontend: https://$host"
+}
+
+# Plan B: Nginx sirviendo la exportación estática, como una Container App más del entorno.
+frontend_contenedor() {
+  local api=$1 docker="${DOCKER:-docker}" host
+  command -v "$docker" >/dev/null || { echo "No se encuentra '$docker'. Define DOCKER=docker.exe si usas WSL." >&2; exit 1; }
+  credenciales_acr
+  az acr credential show -n "$ACR" --query "passwords[0].value" -o tsv | tr -d '
+'     | "$docker" login "$ACR_SRV" -u "$ACR_USER" --password-stdin
+  "$docker" build --platform linux/amd64 --build-arg "NEXT_PUBLIC_API_URL=$api" -t "$ACR_SRV/frontend-web:$TAG" ./frontend-web
+  "$docker" push "$ACR_SRV/frontend-web:$TAG"
+  if az containerapp show -n frontend-web -g "$RG" >/dev/null 2>&1; then
+    az containerapp update -n frontend-web -g "$RG" --image "$ACR_SRV/frontend-web:$TAG" >/dev/null
+  else
+    az containerapp create -n frontend-web -g "$RG" --environment "$CAE"       --image "$ACR_SRV/frontend-web:$TAG" --registry-server "$ACR_SRV"       --registry-username "$ACR_USER" --registry-password "$ACR_PASS"       --ingress external --target-port 80 --min-replicas 0 --max-replicas 1 --cpu 0.25 --memory 0.5Gi >/dev/null
+  fi
+  host=$(az containerapp show -n frontend-web -g "$RG" --query properties.configuration.ingress.fqdn -o tsv | tr -d '')
+  aplicar_cors "https://$host"
+  echo "URL pública del frontend: https://$host"
+}
+
 paso_frontend() {
-  az staticwebapp create -n "$SWA" -g "$RG" -l "$LOC" --sku Free || true
-  GW=$(az containerapp show -n gateway -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
-  # La URL del gateway se graba al compilar.
-  (cd frontend-web && npm ci && NEXT_PUBLIC_API_URL="https://$GW/api/v1" npm run build)
-  TOKEN=$(az staticwebapp secrets list -n "$SWA" -g "$RG" --query properties.apiKey -o tsv)
-  npx --yes @azure/static-web-apps-cli deploy ./frontend-web/out --deployment-token "$TOKEN" --env production
-  echo "Sitio: https://$(az staticwebapp show -n "$SWA" -g "$RG" --query defaultHostname -o tsv)"
-  echo "Copia esa URL en FRONTEND_URL (deploy/variables.sh) y ejecuta: bash deploy/desplegar.sh cors"
+  local gw api rc=0
+  gw=$(az containerapp show -n gateway -g "$RG" --query properties.configuration.ingress.fqdn -o tsv | tr -d '')
+  api="https://$gw/api/v1"   # se graba en el build del frontend
+  crear_swa || rc=$?
+  case $rc in
+    0) frontend_swa "$api" ;;
+    2) echo "Plan B: frontend-web como Container App (Nginx) en $LOC"; frontend_contenedor "$api" ;;
+    *) echo "No se pudo crear la Static Web App (ver el error arriba)." >&2; exit 1 ;;
+  esac
 }
 
 paso_cors() {
   [[ -n "${FRONTEND_URL:-}" ]] || { echo "Define FRONTEND_URL." >&2; exit 1; }
-  az containerapp update -n gateway -g "$RG" --set-env-vars "CORS_ORIGINS=$FRONTEND_URL"
+  aplicar_cors "$FRONTEND_URL"
 }
 
 case "${1:-}" in
